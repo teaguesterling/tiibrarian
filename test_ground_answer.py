@@ -79,6 +79,43 @@ class Grounding(unittest.TestCase):
         self.assertTrue(r["abstain"])
         self.assertEqual(len(r["kept"]), 0)
 
+    # --- citation resolution: an under-specified citation is not attribution ---
+
+    def test_underspecified_citation_matching_many_pages_is_not_grounded(self):
+        # The span IS verbatim on PAGE_SMALL, but the citation carries only the
+        # generic fields, so it agrees with BOTH pages and identifies neither.
+        # Binding it to whichever page happened to come first would hand a free
+        # pass to the very misattribution this layer exists to catch.
+        c = claim("Drying is the most widely used preservation method.",
+                  "Globally, drying is the most widely used method for preserving foods",
+                  {"kind": "zim", "id": "survivorlibrary"})
+        r = G.ground_answer("Is drying widely used?", [c], PAGES)
+        self.assertTrue(r["abstain"])
+        self.assertEqual(len(r["kept"]), 0)
+        d = r["dropped"][0]
+        self.assertNotEqual(d["verdict"], "grounded")
+        self.assertEqual(d["citation_matched"], 2)
+        self.assertIn("under-specified", d["why"])
+
+    def test_citation_matching_no_retrieved_page_is_not_grounded(self):
+        # Cites a page that was never retrieved: zero matches, so no cited page.
+        c = claim("Drying is the most widely used preservation method.",
+                  "Globally, drying is the most widely used method for preserving foods",
+                  {"kind": "zim", "id": "survivorlibrary",
+                   "path": "never-retrieved.pdf", "page": 7})
+        r = G.ground_answer("Is drying widely used?", [c], PAGES)
+        self.assertTrue(r["abstain"])
+        self.assertEqual(r["dropped"][0]["citation_matched"], 0)
+
+    def test_fully_specified_citation_still_grounds(self):
+        # Guard against over-correcting: a precise citation must still pass.
+        c = claim("Drying is the most widely used preservation method.",
+                  "Globally, drying is the most widely used method for preserving foods",
+                  PAGE_SMALL["retrieved"])
+        r = G.ground_answer("Is drying widely used?", [c], PAGES)
+        self.assertTrue(r["grounded"])
+        self.assertEqual(r["kept"][0]["citation_matched"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

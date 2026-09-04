@@ -49,6 +49,30 @@ span is in **the page the answer cited**. A span that is real but on page 114
 while the answer says page 27 is the defect nobody catches in a *spoken* answer.
 That is `misattributed`, and it is a first-class dropped verdict.
 
+### A citation must resolve to exactly one page
+
+`_same_page` compares only the identity fields a citation and a page *share* —
+deliberately loose, so extra fields (scores, urls) never block a match. But a
+citation carrying only the generic fields (say `{kind, id}` with no
+`path`/`page`) then agrees with **every** retrieved page. Bound to whichever
+page was retrieved first, such a claim reads as `grounded` whenever its span
+happens to sit on that page — a free pass for precisely the misattribution this
+layer exists to catch. An LLM emitting a partial citation is the expected case,
+not an exotic one.
+
+So a citation must resolve to **exactly one** retrieved page:
+
+| matches | meaning | disposition |
+|---|---|---|
+| 1 | the answer named a page | check the span against it |
+| 0 | cited nothing that was retrieved | no cited page — cannot be `grounded` |
+| ≥2 | names a *family* of pages, not a page | under-specified; not attribution — cannot be `grounded` |
+
+Mechanical, no tunable, consistent with C1 being the only mechanical check. A
+claim whose citation does not resolve falls through to the existing
+`misattributed` / `unfounded` verdicts; every verdict carries `citation_matched`
+so the reason is inspectable.
+
 ## When the device frees
 
 The first device run is **C3 support over answer claims** against these fixtures
