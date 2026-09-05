@@ -56,11 +56,20 @@ class CorpusRetrieval(unittest.TestCase):
     def test_page_ident_is_discriminating(self):
         # It must identify ONE page, not a family. book alone is not enough.
         ident = corpus.page_ident(self.top)
-        self.assertEqual(set(ident), {"kind", "source", "book", "page"})
+        self.assertEqual(set(ident), {"kind", "source", "doc", "page"})
+        # `doc`, not `book`: the field is format-neutral, so the same locator
+        # shape names an HTML file or a zim:// entry (see locator.py).
         # `source` is required for uniqueness: 21,726 (book, page) pairs exist in
         # both the native-text and re-OCR lanes across the full corpus.
         matched = [p for p in self.pages if p["retrieved"] == ident]
         self.assertEqual(len(matched), 1)
+
+    def test_locator_string_round_trips_and_names_the_page(self):
+        import locator as L
+        s = corpus.locator_str(self.top)
+        self.assertTrue(s.endswith("#p.%d" % self.top["page"]))
+        self.assertEqual(L.render(L.parse(s)), s)
+        self.assertTrue(L.resolvable(L.parse(s)))
 
     def test_real_span_correctly_cited_is_grounded(self):
         r = G.ground_answer("q", [{"text": "c", "span": self.span,

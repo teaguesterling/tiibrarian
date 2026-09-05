@@ -83,7 +83,7 @@ def verify_claim(claim, pages):
     of the page the answer attributes the span to (a page's `retrieved`).
     pages: [adapter Document]. -> a per-claim verdict dict."""
     c1 = _c1()
-    cited = claim.get("cites")
+    cited = _as_ident(claim.get("cites"))
     span = claim.get("span", "")
 
     # 1) the pages this citation names, and whether the span is on them
@@ -132,6 +132,23 @@ def verify_claim(claim, pages):
     return {"claim": claim["text"], "verdict": "unfounded", "span": span,
             "cited_page": cited, "citation_matched": n,
             "why": "span does not occur verbatim in any retrieved page" + amb}
+
+
+def _as_ident(cited):
+    """A citation may be a structured identity or a locator STRING.
+
+    A model writes `manual.pdf#p.27`, not a dict, so accept it and parse it into the
+    structured form the comparison uses. Parsing is what makes the string form real
+    rather than decorative: an unparsed string compares equal to nothing and would
+    silently never match.
+    """
+    if isinstance(cited, str):
+        try:
+            import locator
+            return locator.parse(cited)
+        except Exception:
+            return {"doc": cited}
+    return cited
 
 
 def _same_page(retrieved, cited):

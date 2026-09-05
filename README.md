@@ -54,6 +54,7 @@ Everything else here is a stand-in for the NPU until the embeddings run finishes
 ground_answer.py   the verifier: claims + retrieved pages -> grounded | abstain
 seam.py            the loop over an fts corpus: retrieve -> synthesize -> ground
 corpus.py          the loop over the NPU vector index: two-stage cosine + the same grounding
+locator.py         naming a passage in any format, and whether it can be read back
 CONTRACT.md        the answer-grounding contract
 test_ground_answer.py, test_seam.py   hermetic (no device, no network)
 test_corpus.py     integration; skipped unless the vector index is present
@@ -80,6 +81,35 @@ NPU embedder, not its CPU one. Same model, different backends: cosine between th
 outputs is ~0.97, and the CPU's are L2-normalised while the NPU's are raw. Mixing them
 does not fail, it just quietly retrieves worse, so `corpus.embed_query` raises rather
 than substituting anything.
+
+## Locators — citing a passage in any format
+
+The corpus is not only PDFs, so a citation cannot only be a page number. A locator is a
+document plus a fragment naming a position inside it, and **every form maps to a call
+that can read it back** — a citation that cannot be resolved is decoration.
+
+| locator | means | read back by |
+|---|---|---|
+| `manual.pdf#p.27` | page (or `#p.3-7`) | `read_pdf_blocks(src, pages := '27')` |
+| `foo.html#methods` | section, by heading id **or** text | `doc_section(src, 'methods')` |
+| `any.docx#b12-b40` | block range | `duck_blocks_slice(…, 12, 40)` |
+| `notes.md#L2-L5` | line range | **nothing yet — see below** |
+| `zim://wiki.zim/Photosynthesis#intro` | duckeye's zim scheme + section | as HTML |
+| `plain.txt` | the whole document | `panduck_read_blocks(src)` |
+
+`#b…` is the format-agnostic one: every `duck_block` carries `element_order` whatever the
+reader was, so a block range addresses HTML, Markdown, DOCX, EPUB and PDF identically.
+Pages exist only in paginated formats, sections only where there are headings. Prefer the
+most specific form the format supports; fall back to `#b…`, which always exists.
+
+**`#L2-L5` parses and round-trips but `locator.resolvable()` returns False**, because
+nothing in the stack addresses lines: panduck has no line-range reader and `duck_block`s
+carry no line numbers. It is the obvious spelling for Markdown and a person will write it,
+so it is accepted and recorded — and honestly reported as unresolvable rather than
+silently treated as a section name.
+
+A citation may be **the string itself** — a model writes `manual.pdf#p.27`, not a dict —
+and `ground_answer` parses it into the structured identity the comparison uses.
 
 ## Depends on
 

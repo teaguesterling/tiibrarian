@@ -41,6 +41,7 @@ import urllib.request
 import duckdb
 
 import ground_answer as G
+import locator
 
 CORPUS = os.environ.get(
     "TIIBRARIAN_CORPUS",
@@ -111,8 +112,17 @@ def page_ident(hit):
     fields here (chapter, section, passage ordinal) as the index gains them; a locator
     should always be able to name exactly one passage when the caller knows which.
     """
-    return {"kind": KIND, "source": hit["source"], "book": hit["book"],
+    return {"kind": KIND, "source": hit["source"], "doc": hit["book"],
             "page": hit["page"]}
+
+
+def locator_str(hit):
+    """The citation as a string: `somebook.pdf#p.27`.
+
+    `doc` rather than `book` because the field is format-neutral -- the same locator
+    shape names an HTML file, a Markdown note or a zim:// entry. See locator.py.
+    """
+    return locator.render({"doc": hit["book"], "page": hit["page"]})
 
 
 def hits_to_pages(hits):
