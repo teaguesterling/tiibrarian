@@ -18,7 +18,7 @@ cordexa's rule — **retrieval proposes, C1 decides** — at *answer* time:
 
 ## What "grounded" means — and does not
 
-`grounded` means exactly: *these words are verbatim on the page cited.* It does
+`grounded` means exactly: *these words are verbatim on every page the citation names.* It does
 **not** mean the claim is true, or even that the span supports it. A verbatim,
 correctly-cited span can still be over-reached (page says "drying", claim says
 "sun drying"). That is the **C3** question — claim-vs-span support — and it needs

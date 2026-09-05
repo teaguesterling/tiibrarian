@@ -23,7 +23,8 @@ the page the claim **cites**:
 
 | span is… | verdict | disposition |
 |---|---|---|
-| verbatim in the CITED page | `grounded` | kept |
+| verbatim on **every** page the citation names | `grounded` | kept |
+| verbatim on **some but not all** of them | `ambiguous` | dropped |
 | verbatim in a DIFFERENT retrieved page | `misattributed` | dropped |
 | in NO retrieved page | `unfounded` | dropped |
 
@@ -49,29 +50,37 @@ span is in **the page the answer cited**. A span that is real but on page 114
 while the answer says page 27 is the defect nobody catches in a *spoken* answer.
 That is `misattributed`, and it is a first-class dropped verdict.
 
-### A citation must resolve to exactly one page
+### A citation names pages; ambiguity matters only when it changes the verdict
 
 `_same_page` compares only the identity fields a citation and a page *share* —
-deliberately loose, so extra fields (scores, urls) never block a match. But a
-citation carrying only the generic fields (say `{kind, id}` with no
-`path`/`page`) then agrees with **every** retrieved page. Bound to whichever
-page was retrieved first, such a claim reads as `grounded` whenever its span
-happens to sit on that page — a free pass for precisely the misattribution this
-layer exists to catch. An LLM emitting a partial citation is the expected case,
-not an exotic one.
+deliberately loose, so extra fields (scores, urls) never block a match. A citation
+therefore resolves to a **set** of retrieved pages, which may be empty, one, or several.
 
-So a citation must resolve to **exactly one** retrieved page:
+An earlier version of this contract required **exactly one** and refused otherwise. That
+was too strict, and it rejected true claims. The corpus contains passages that appear
+verbatim at more than one position — measured: the same text at p.57 of two printings of
+one chemistry manual, and 1.8% of pages are exact duplicates of another. A citation that
+cannot tell two identical passages apart is still a **correct** citation: the span is
+verbatim on both, so the verdict is the same whichever was meant.
 
-| matches | meaning | disposition |
+The rule is therefore about **consequence, not arity**:
+
+| citation resolves to | span is verbatim on | verdict |
 |---|---|---|
-| 1 | the answer named a page | check the span against it |
-| 0 | cited nothing that was retrieved | no cited page — cannot be `grounded` |
-| ≥2 | names a *family* of pages, not a page | under-specified; not attribution — cannot be `grounded` |
+| 0 pages | — | not cited; falls through to `misattributed` / `unfounded` |
+| N ≥ 1 pages | **all N** | `grounded` — the ambiguity cannot change the answer |
+| N > 1 pages | **some, not all** | `ambiguous` — binding to one would be arbitrary *and* outcome-changing |
+| N ≥ 1 pages | **none** | falls through to `misattributed` / `unfounded` |
 
-Mechanical, no tunable, consistent with C1 being the only mechanical check. A
-claim whose citation does not resolve falls through to the existing
-`misattributed` / `unfounded` verdicts; every verdict carries `citation_matched`
-so the reason is inspectable.
+With N = 1 this is exactly the old behaviour. Every verdict carries `citation_matched`,
+and a `grounded` claim with N > 1 also carries `found_on` listing the pages it is true of,
+so a reader can see that the citation was imprecise even though the claim stands.
+
+**This is why locators should be granular.** The way to avoid `ambiguous` is not a looser
+check but a citation that names a position precisely enough to pin one passage —
+`{kind, source, book, page}` today, growing to chapter, section, or a passage ordinal as
+passages become sub-page. `source` is already load-bearing: 21,726 (book, page) pairs
+exist in both the native-text and re-OCR lanes, so a locator without it is not unique.
 
 ## When the device frees
 

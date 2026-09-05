@@ -56,7 +56,9 @@ class CorpusRetrieval(unittest.TestCase):
     def test_page_ident_is_discriminating(self):
         # It must identify ONE page, not a family. book alone is not enough.
         ident = corpus.page_ident(self.top)
-        self.assertEqual(set(ident), {"kind", "book", "page"})
+        self.assertEqual(set(ident), {"kind", "source", "book", "page"})
+        # `source` is required for uniqueness: 21,726 (book, page) pairs exist in
+        # both the native-text and re-OCR lanes across the full corpus.
         matched = [p for p in self.pages if p["retrieved"] == ident]
         self.assertEqual(len(matched), 1)
 

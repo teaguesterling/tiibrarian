@@ -22,9 +22,17 @@ THREE THINGS THAT LOOK LIKE STYLE AND ARE NOT:
   their outputs is ~0.97 and the CPU's are L2-normalised while the NPU's are raw
   (norm ~100). Mixing them does not fail, it just quietly retrieves worse.
 
-* Page identity is `{kind, book, page}` -- discriminating on purpose. `ground_answer`
-  requires a citation to resolve to exactly ONE retrieved page; an identity that omits
-  `page` would match every page of a book and hand back a false `grounded`.
+* Page identity is `{kind, source, book, page}`. `source` is the extraction lane the
+  page came from, and it is NOT decoration: re-OCR fixes bad pages inside books that
+  already had a text layer, so the same (book, page) exists in two lanes with different
+  text. Measured on the full corpus: 21,726 (book, page) pairs appear in BOTH the
+  native-text and re-OCR lanes. Without `source` the locator is not unique and those
+  pages would resolve ambiguously the moment the OCR lanes are embedded. The test index
+  is 100% native text, which is exactly why this would not have shown up in testing.
+
+  The locator carries the finest position the index has, and is meant to grow: when
+  passages become sub-page (Wikipedia articles, Gutenberg chapters), add `chapter`,
+  `section` or a passage ordinal so a citation can still name exactly one passage.
 """
 import json
 import os
@@ -82,22 +90,29 @@ def retrieve(qvec, db=None, topk=8, shortlist=200, con=None):
         con.execute("LOAD vss")
         rows = con.execute(
             # SUBQUERY, NOT A CTE -- see the module docstring.
-            "SELECT book, page, text, "
+            "SELECT source, book, page, text, "
             "       array_cosine_distance(vec, ?::FLOAT[{d}]) AS dist "
-            "FROM (SELECT book, page, text, vec FROM pages "
+            "FROM (SELECT source, book, page, text, vec FROM pages "
             "      ORDER BY array_cosine_distance(vec256, ?::FLOAT[{c}]) LIMIT ?) "
             "ORDER BY dist LIMIT ?".format(d=DIM, c=COARSE),
             [qvec, qvec[:COARSE], shortlist, topk]).fetchall()
     finally:
         if own:
             con.close()
-    return [{"n": i + 1, "book": b, "page": p, "text": t, "score": 1.0 - d}
-            for i, (b, p, t, d) in enumerate(rows)]
+    return [{"n": i + 1, "source": src, "book": b, "page": p, "text": t,
+             "score": 1.0 - d}
+            for i, (src, b, p, t, d) in enumerate(rows)]
 
 
 def page_ident(hit):
-    """The retrieved-identity a claim cites. Must identify exactly one page."""
-    return {"kind": KIND, "book": hit["book"], "page": hit["page"]}
+    """The retrieved-identity a claim cites: the finest position the index has.
+
+    `source` is load-bearing, not decoration -- see the module docstring. Add finer
+    fields here (chapter, section, passage ordinal) as the index gains them; a locator
+    should always be able to name exactly one passage when the caller knows which.
+    """
+    return {"kind": KIND, "source": hit["source"], "book": hit["book"],
+            "page": hit["page"]}
 
 
 def hits_to_pages(hits):

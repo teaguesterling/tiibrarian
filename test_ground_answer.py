@@ -81,11 +81,10 @@ class Grounding(unittest.TestCase):
 
     # --- citation resolution: an under-specified citation is not attribution ---
 
-    def test_underspecified_citation_matching_many_pages_is_not_grounded(self):
-        # The span IS verbatim on PAGE_SMALL, but the citation carries only the
-        # generic fields, so it agrees with BOTH pages and identifies neither.
-        # Binding it to whichever page happened to come first would hand a free
-        # pass to the very misattribution this layer exists to catch.
+    def test_ambiguity_that_changes_the_verdict_is_refused(self):
+        # The span is verbatim on PAGE_SMALL only, but the citation carries just the
+        # generic fields, so it names BOTH pages. Binding to one grounds and binding
+        # to the other does not, and nothing says which was meant -- so refuse.
         c = claim("Drying is the most widely used preservation method.",
                   "Globally, drying is the most widely used method for preserving foods",
                   {"kind": "zim", "id": "survivorlibrary"})
@@ -93,9 +92,41 @@ class Grounding(unittest.TestCase):
         self.assertTrue(r["abstain"])
         self.assertEqual(len(r["kept"]), 0)
         d = r["dropped"][0]
-        self.assertNotEqual(d["verdict"], "grounded")
+        self.assertEqual(d["verdict"], "ambiguous")
         self.assertEqual(d["citation_matched"], 2)
-        self.assertIn("under-specified", d["why"])
+        self.assertIn("changes the verdict", d["why"])
+
+    def test_ambiguity_that_cannot_change_the_verdict_is_kept(self):
+        # THE CASE THAT USED TO BE REJECTED. Two DIFFERENT pages carry the identical
+        # passage -- real on this corpus: the same text appears at p.57 of two
+        # printings of one chemistry manual. A citation that cannot tell them apart is
+        # still correct, because the span is verbatim on every page it names and the
+        # verdict is the same whichever was meant. Refusing here rejects a true claim.
+        twin = dict(PAGE_SMALL)
+        twin["requested"] = twin["retrieved"] = {
+            "kind": "zim", "id": "survivorlibrary",
+            "path": "smallscale-food-drying-technologies-2nd-printing.pdf", "page": 1}
+        c = claim("Drying is the most widely used preservation method.",
+                  "Globally, drying is the most widely used method for preserving foods",
+                  {"kind": "zim", "id": "survivorlibrary"})
+        r = G.ground_answer("Is drying widely used?", [c], [PAGE_SMALL, twin])
+        self.assertTrue(r["grounded"])
+        self.assertFalse(r["abstain"])
+        kept = r["kept"][0]
+        self.assertEqual(kept["citation_matched"], 2)
+        self.assertEqual(len(kept["found_on"]), 2)   # both named, both carry the span
+        self.assertFalse(kept["support_checked"])
+
+    def test_single_match_still_records_one(self):
+        # Guard against over-correcting: the ordinary unambiguous case is unchanged
+        # and must not start reporting a list of pages.
+        c = claim("Drying prevents microbial growth by removing moisture.",
+                  "Drying removes the moisture from the food so bacteria, yeast and mold cannot grow",
+                  PAGE_PRESERVE["retrieved"])
+        r = G.ground_answer("q", [c], PAGES)
+        self.assertTrue(r["grounded"])
+        self.assertEqual(r["kept"][0]["citation_matched"], 1)
+        self.assertIsNone(r["kept"][0]["found_on"])
 
     def test_citation_matching_no_retrieved_page_is_not_grounded(self):
         # Cites a page that was never retrieved: zero matches, so no cited page.

@@ -19,10 +19,16 @@ A citation must resolve to EXACTLY ONE retrieved page (`_resolve_cited`). Zero
 matches, or two or more, means the answer did not attribute the span to a page,
 so the claim cannot be grounded -- an under-specified citation is not attribution.
 
+A citation resolves to the retrieved pages whose identity it matches. Resolving to
+SEVERAL is not itself a failure: if the span is verbatim on all of them the answer is
+the same whichever was meant, so the claim stands. It fails only when the ambiguity is
+outcome-changing -- the span on some candidates and not others -- which is `ambiguous`.
+
 Two mechanical verdicts, per the advisor's split:
   - span in the CITED page            -> grounded            (kept)
   - span in a DIFFERENT retrieved page -> misattributed       (dropped)  <- the spoken-answer defect
   - span in NO retrieved page          -> unfounded           (dropped)  <- confabulation
+  - cited pages disagree about the span -> ambiguous          (dropped)  <- cannot tell which
 
 Abstain rule, structural (stated before any output, no tunable): a claim that is
 not `grounded` is dropped; the answer ABSTAINS iff zero claims survive. A
@@ -56,24 +62,20 @@ def _c1():
     return _C1
 
 
-def _resolve_cited(pages, cited):
-    """The single retrieved page a claim cites -> (page|None, n_matched).
+def _cited_pages(pages, cited):
+    """Every retrieved page the citation resolves to. May be 0, 1, or several.
 
-    A citation must identify EXACTLY ONE retrieved page. Zero matches means the
-    answer cited nothing that was retrieved. Two or more means the citation is
-    under-specified: it names a *family* of pages, not a page, and an
-    under-specified citation is not attribution. Either way there is no cited
-    page, so the claim cannot be `grounded`.
+    A citation that resolves to nothing is not attribution. A citation that resolves
+    to SEVERAL is not automatically a failure -- see verify_claim. What matters is
+    whether the ambiguity can change the verdict, not that it exists: if the span is
+    verbatim on every page the citation names, binding to any one of them gives the
+    same answer, and refusing would reject a claim that is true of all of them.
 
-    Without this, a citation carrying only generic fields (e.g. {kind, id} but
-    no path/page) agrees with every page, so `_same_page` matches them all and
-    the claim silently binds to whichever page happened to be retrieved first --
-    handing a free pass to exactly the misattribution this layer exists to
-    catch. An LLM emitting a partial citation is the expected case, not an
-    exotic one.
+    Real case, measured on the SurvivorLibrary index: the same passage appears verbatim
+    at p.57 of two different printings of the same chemistry manual. A citation that
+    cannot tell those two apart is still a correct citation.
     """
-    matches = [p for p in pages if _same_page(p.get("retrieved"), cited)]
-    return (matches[0] if len(matches) == 1 else None), len(matches)
+    return [p for p in pages if _same_page(p.get("retrieved"), cited)]
 
 
 def verify_claim(claim, pages):
@@ -84,33 +86,51 @@ def verify_claim(claim, pages):
     cited = claim.get("cites")
     span = claim.get("span", "")
 
-    # 1) is the span in the page the claim CITES?
-    cited_page, n_matched = _resolve_cited(pages, cited)
-    if cited_page is not None:
-        v, why = c1.check(span, cited_page, cited_locator=cited_page["retrieved"])
-        if v == "pass":
+    # 1) the pages this citation names, and whether the span is on them
+    matches = _cited_pages(pages, cited)
+    n = len(matches)
+    if n:
+        on = [p for p in matches
+              if c1.check(span, p, cited_locator=p["retrieved"])[0] == "pass"]
+        if len(on) == n:
+            # Verbatim on EVERY page the citation names. With n == 1 this is the
+            # ordinary case. With n > 1 the citation is under-specified but harmless:
+            # every candidate gives this same verdict, so the ambiguity is immaterial.
             return {"claim": claim["text"], "verdict": "grounded", "span": span,
-                    "cited_page": cited, "citation_matched": 1,
+                    "cited_page": cited, "citation_matched": n,
+                    "found_on": [p["retrieved"] for p in on] if n > 1 else None,
                     "support_checked": False, "why": ""}
+        if on:
+            # Verbatim on SOME but not all. Here the ambiguity DOES change the verdict:
+            # binding to one candidate grounds, binding to another does not, and nothing
+            # in the citation says which was meant. Refuse rather than pick.
+            return {"claim": claim["text"], "verdict": "ambiguous", "span": span,
+                    "cited_page": cited, "citation_matched": n,
+                    "found_on": [p["retrieved"] for p in on],
+                    "why": "the citation names %d retrieved pages and the span is "
+                           "verbatim on only %d of them, so which page is cited "
+                           "changes the verdict" % (n, len(on))}
+        # verbatim on none of them -> fall through
 
-    amb = ("" if n_matched <= 1 else
-           " (the citation matched %d retrieved pages — under-specified, so it "
-           "identifies no single page)" % n_matched)
+    amb = ("" if n <= 1 else
+           " (the citation matched %d retrieved pages and the span is on none of "
+           "them)" % n)
 
-    # 2) not in the cited page — is it verbatim in some OTHER retrieved page?
+    # 2) not on the cited page(s) — is it verbatim in some OTHER retrieved page?
+    cited_set = {id(p) for p in matches}
     for p in pages:
-        if p is cited_page:
+        if id(p) in cited_set:
             continue
         v, _ = c1.check(span, p, cited_locator=p["retrieved"])
         if v == "pass":
             return {"claim": claim["text"], "verdict": "misattributed", "span": span,
                     "cited_page": cited, "found_on": p["retrieved"],
-                    "citation_matched": n_matched,
+                    "citation_matched": n,
                     "why": "span is verbatim but on a page the answer did not cite" + amb}
 
     # 3) nowhere in the retrieved set
     return {"claim": claim["text"], "verdict": "unfounded", "span": span,
-            "cited_page": cited, "citation_matched": n_matched,
+            "cited_page": cited, "citation_matched": n,
             "why": "span does not occur verbatim in any retrieved page" + amb}
 
 
@@ -128,7 +148,7 @@ def ground_answer(question, claims, pages):
     """-> a grounded answer or an abstention.
 
     {"question", "grounded": bool, "kept": [...grounded claims...],
-     "dropped": [...misattributed/unfounded, with reasons...],
+     "dropped": [...misattributed/ambiguous/unfounded, with reasons...],
      "abstain": bool, "note": str}
     """
     verdicts = [verify_claim(c, pages) for c in claims]
