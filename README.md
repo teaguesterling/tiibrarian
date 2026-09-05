@@ -36,11 +36,14 @@ What's in this repo today is **NPU-free scaffolding**, built deliberately so the
 whole loop is runnable and testable on a workstation *while the device is busy
 building the vector index*:
 
-- `seam.retrieve()` uses DuckDB **fts** over a docs corpus. The final version
-  swaps it for **cosine over the on-device survivorlibrary vectors** — same seam,
-  different `retrieve()`.
-- `seam.synth` is a **mock** that emits quoted claims. The final version points
-  it at the device's local `/v1` endpoint (the `tiiny-duckdb-rag` ask shape).
+- `seam.retrieve()` uses DuckDB **fts** over a docs corpus — kept, because it is real
+  retrieval that needs no device and makes the tests hermetic.
+- `corpus.retrieve()` is the **vector backend, and it exists now**: two-stage cosine over
+  the SurvivorLibrary page vectors embedded on the NPU. Same seam, different `retrieve()`,
+  as planned. Verified against a real 1,310,336-page index.
+- `seam.synth` is still a **mock** that emits quoted claims. The final version points it
+  at the device's local `/v1` endpoint (the `tiiny-duckdb-rag` ask shape). This is now the
+  only piece standing between the loop and a real answer.
 
 Only the *grounding* (C1) is final as-is — it is mechanical and runs anywhere.
 Everything else here is a stand-in for the NPU until the embeddings run finishes.
@@ -49,9 +52,11 @@ Everything else here is a stand-in for the NPU until the embeddings run finishes
 
 ```
 ground_answer.py   the verifier: claims + retrieved pages -> grounded | abstain
-seam.py            the loop: retrieve -> synthesize -> ground  (retrieval is real; synth pluggable)
+seam.py            the loop over an fts corpus: retrieve -> synthesize -> ground
+corpus.py          the loop over the NPU vector index: two-stage cosine + the same grounding
 CONTRACT.md        the answer-grounding contract
-test_*.py          hermetic (no device, no network) — real fts retrieval + mechanical C1
+test_ground_answer.py, test_seam.py   hermetic (no device, no network)
+test_corpus.py     integration; skipped unless the vector index is present
 ```
 
 ## Run
@@ -60,10 +65,21 @@ test_*.py          hermetic (no device, no network) — real fts retrieval + mec
 # tests — no device, no network
 CORDEXA_HOME=~/Projects/cordexa python3 -m unittest discover -p 'test_*.py'
 
-# a grounded ask over a docs corpus (mock synth; real retrieval)
+# a grounded ask over a docs corpus (mock synth; real fts retrieval)
 CORDEXA_HOME=~/Projects/cordexa python3 seam.py "what is duckdb" \
     --db ~/Projects/tiiny-duckdb-rag/corpus.duckdb --topk 3
+
+# a grounded ask over the SurvivorLibrary vector index (needs the device to embed
+# the question: TIINY_AUTH_KEY + the NPU embedder)
+CORDEXA_HOME=~/Projects/cordexa TIINY_AUTH_KEY=... python3 corpus.py \
+    "how do you can green beans without a pressure canner"
 ```
+
+**The query must be embedded by the same encoder that built the index** — the device's
+NPU embedder, not its CPU one. Same model, different backends: cosine between their
+outputs is ~0.97, and the CPU's are L2-normalised while the NPU's are raw. Mixing them
+does not fail, it just quietly retrieves worse, so `corpus.embed_query` raises rather
+than substituting anything.
 
 ## Depends on
 
@@ -76,7 +92,11 @@ Pairs with `tiiny-duckdb-rag` (the retrieval/ask loop) and `TTt` (device tooling
 
 ## When the device frees
 
-First device run is **C3 support over the answer claims** — does the grounded
-span actually support the spoken claim — which closes the `support_checked: False`
-gap. Then swap `retrieve()` to the vector backend and `synth` to the on-device
-LLM, and tiibrarian is answering from the real library, on the NPU.
+`retrieve()` is done — `corpus.py` is the vector backend, tested against the real index.
+Two things remain:
+
+1. **C3 support over the answer claims** — does the grounded span actually support the
+   spoken claim — which closes the `support_checked: False` gap.
+2. **`synth` against the on-device LLM**, replacing the mock.
+
+With those, tiibrarian is answering from the real library, on the NPU.
