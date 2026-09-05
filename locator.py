@@ -14,7 +14,22 @@ FRAGMENT GRAMMAR, and what re-reads each one:
     #p.27        #p.3-7      page / page range   -> read_pdf_blocks(src, pages := '3-7')
     #b12-b40                 block range         -> duck_blocks_slice(blocks, 12, 40)
     #L2-L5                   line range          -> NOTHING RESOLVES THIS YET
-    #methods                 section id or text  -> doc_section(src, 'methods')
+    #methods                 id or heading text  -> doc_section, THEN doc_container
+
+A NAMED FRAGMENT HAS TWO RESOLUTIONS, on different axes, and which is right depends on
+what the id is attached to:
+
+  doc_section(src, id)    walks HEADINGS and bounds on heading_level -- "the prose under
+                          this title". Right for <h2 id="methods">.
+  doc_container(src, id)  walks the STRUCTURAL nesting in `level` -- "what is inside this
+                          box": a div, section, article, list, blockquote. Right for
+                          <div id="sidebar">, for which doc_section returns nothing at
+                          all, since it only matches headings.
+
+A document can disagree about the two -- a div can hold three headings, and a heading's
+section can run across several divs -- so neither subsumes the other. Trying section and
+falling back to container is closer to what a browser does with a fragment than either
+alone, so that is the chain.
 
 `#b…` is the format-agnostic one: every duck_block carries `element_order` whatever the
 reader was, so a block range addresses HTML, Markdown, DOCX, EPUB and PDF identically.
@@ -34,13 +49,22 @@ for citations, CLIs and MCP output, and it must round-trip.
 """
 import re
 
-# fragment kind -> how it is re-read. None means "not resolvable yet".
+# fragment kind -> the calls that re-read it, tried in order. None = not resolvable yet.
 RESOLVERS = {
-    "page":    "read_pdf_blocks(src, pages := '{v}')",
-    "blocks":  "duck_blocks_slice(panduck_read_blocks(src), {a}, {b})",
-    "section": "doc_section(src, '{v}')",
+    "page":    ("read_pdf_blocks(src, pages := '{v}')",),
+    "blocks":  ("duck_blocks_slice(panduck_read_blocks(src), {a}, {b})",),
+    "section": ("doc_section(src, '{v}')", "doc_container(src, '{v}')"),
     "lines":   None,
 }
+
+# A named fragment can only resolve if the id survived into the blocks, and THAT depends
+# on the installed webbed, not on panduck. On the published build (093856b) only div,
+# section/article and headings keep their id, so `<ul id="steps">` is unaddressable;
+# webbed 60318d8 widens it to every block behind a capture_attributes parameter, and is
+# unreleased. So a `#name` locator is resolvable in principle and may still find nothing
+# on a given install -- reported here rather than discovered at query time.
+ID_CAPTURE = ("published webbed 093856b captures id on div, section/article and headings "
+              "only; 60318d8 widens it to every block but is unreleased")
 
 _PAGE = re.compile(r"^p\.(\d+)(?:-(\d+))?$")
 _LINES = re.compile(r"^L(\d+)(?:-L?(\d+))?$")
@@ -128,15 +152,19 @@ def resolvable(loc):
 
 
 def how_to_read(loc):
-    """The call that re-reads this locator, or None if nothing does yet."""
+    """The calls that re-read this locator, in order, or None if nothing does yet.
+
+    A list rather than one call because a named fragment has two resolutions: try
+    doc_section, then doc_container. Callers should take the first that returns blocks.
+    """
     k = kind(loc)
     if k is None:
-        return "panduck_read_blocks(src)"
-    tmpl = RESOLVERS.get(k)
-    if tmpl is None:
+        return ["panduck_read_blocks(src)"]
+    tmpls = RESOLVERS.get(k)
+    if tmpls is None:
         return None
-    if k in ("blocks",):
-        return tmpl.format(a=loc[k], b=loc.get(k + "_to", loc[k]))
+    if k == "blocks":
+        return [t.format(a=loc[k], b=loc.get(k + "_to", loc[k])) for t in tmpls]
     end = loc.get(k + "_to")
     v = f"{loc[k]}" + (f"-{end}" if end is not None else "")
-    return tmpl.format(v=v)
+    return [t.format(v=v) for t in tmpls]

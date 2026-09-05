@@ -51,7 +51,22 @@ class Resolvability(unittest.TestCase):
                         ("a.docx#b1-b9", "duck_blocks_slice"),
                         ("a.txt", "panduck_read_blocks")):
             self.assertTrue(L.resolvable(L.parse(s)), s)
-            self.assertIn(frag, L.how_to_read(L.parse(s)))
+            self.assertIn(frag, " ".join(L.how_to_read(L.parse(s))), s)
+
+    def test_a_named_fragment_resolves_on_two_axes_in_order(self):
+        # doc_section walks HEADINGS; doc_container walks the STRUCTURAL nesting. A
+        # fragment on <h2 id="methods"> wants the first, one on <div id="sidebar"> the
+        # second -- and doc_section returns NOTHING for a div, so a single-resolver
+        # grammar silently fails to resolve half the fragments a browser handles.
+        calls = L.how_to_read(L.parse("page.html#sidebar"))
+        self.assertEqual(len(calls), 2)
+        self.assertIn("doc_section", calls[0])
+        self.assertIn("doc_container", calls[1])
+
+    def test_positional_forms_have_exactly_one_resolution(self):
+        # Only named fragments are ambiguous about axis; a page is a page.
+        for s in ("a.pdf#p.4", "a.docx#b1-b9", "a.txt"):
+            self.assertEqual(len(L.how_to_read(L.parse(s))), 1, s)
 
     def test_line_ranges_parse_but_are_honestly_unresolvable(self):
         # #L2-L5 is the natural spelling for Markdown and nothing in the stack can
@@ -60,6 +75,13 @@ class Resolvability(unittest.TestCase):
         self.assertEqual((loc["lines"], loc["lines_to"]), (2, 5))
         self.assertFalse(L.resolvable(loc))
         self.assertIsNone(L.how_to_read(loc))
+
+    def test_id_capture_limitation_is_recorded(self):
+        # Whether a #name can resolve depends on the INSTALLED webbed, not on panduck:
+        # the published build keeps id only on div, section/article and headings, so
+        # <ul id="steps"> is unaddressable today. Recorded rather than discovered at
+        # query time.
+        self.assertIn("webbed", L.ID_CAPTURE)
 
 
 PAGE = {"requested": {"kind": "corpus", "doc": "manual.pdf", "page": 27},

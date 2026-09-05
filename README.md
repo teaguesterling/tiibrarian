@@ -91,11 +91,24 @@ that can read it back** — a citation that cannot be resolved is decoration.
 | locator | means | read back by |
 |---|---|---|
 | `manual.pdf#p.27` | page (or `#p.3-7`) | `read_pdf_blocks(src, pages := '27')` |
-| `foo.html#methods` | section, by heading id **or** text | `doc_section(src, 'methods')` |
+| `foo.html#methods` | id or heading text | `doc_section`, then `doc_container` |
 | `any.docx#b12-b40` | block range | `duck_blocks_slice(…, 12, 40)` |
 | `notes.md#L2-L5` | line range | **nothing yet — see below** |
 | `zim://wiki.zim/Photosynthesis#intro` | duckeye's zim scheme + section | as HTML |
 | `plain.txt` | the whole document | `panduck_read_blocks(src)` |
+
+**A named fragment resolves on two axes.** `doc_section` walks *headings* and bounds on
+heading level — the prose under a title. `doc_container` (new in panduck) walks the
+*structural* nesting — what is inside a `<div>`, `<section>`, list or blockquote. Neither
+subsumes the other: a div can hold three headings, and a heading's section can run across
+several divs. A fragment on `<h2 id="methods">` wants the first; one on
+`<div id="sidebar">` wants the second, and `doc_section` returns nothing at all for it.
+So `#name` tries section, then container — which is closer to what a browser does with a
+fragment than either alone.
+
+Whether a `#name` resolves at all also depends on the **installed webbed**, not on
+panduck: the published build keeps `id` only on div, section/article and headings, so
+`<ul id="steps">` is unaddressable today. `locator.ID_CAPTURE` records that.
 
 `#b…` is the format-agnostic one: every `duck_block` carries `element_order` whatever the
 reader was, so a block range addresses HTML, Markdown, DOCX, EPUB and PDF identically.
