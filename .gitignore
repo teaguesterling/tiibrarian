@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+*.log
+c3_batch_results.json
+
+# Personal NPU-serialisation wrapper: drives this workstation's watchdog and
+# embed driver by name, so it is not part of the published library.
+c3_window.sh
