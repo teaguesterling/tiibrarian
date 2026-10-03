@@ -235,6 +235,75 @@ def retrieve(question, archive, topk=5, max_relax=MAX_RELAX, titles=True, title_
     return hits
 
 
+#: The passage index built from the shelf: 1.73M chunks over 19 corpora, Qwen3
+#: embeddings, an HNSW on the 256-dim truncation. Built already; this layer reads it.
+VECTOR_INDEX = os.environ.get(
+    "TIIBRARIAN_ZIM_INDEX", os.path.expanduser("~/corpus/zim-corpora.duckdb"))
+
+
+def vector_retrieve(question, archive=None, topk=5, shortlist=200, con=None, index=None):
+    """Semantic retrieval over the passage index. Same hit shape as `retrieve`.
+
+    THIS IS THE MODE THAT WORKS, and the difference is not marginal. Measured on
+    the same four questions, full text vs vectors:
+
+        "What is tidal range?"        Selenography          -> Tide
+        "How do tides work?"          Happisburgh_archaeology -> Tide
+        "What is a tidal bore?"       River_Trent           -> Tide
+        "What causes a lunar eclipse?" March_2025_lunar_eclipse -> Lunar_eclipse
+
+    Full text fails on these because a ZIM query is a conjunction over content
+    words, so one low-information word from the question ("work", "causes")
+    dominates the ranking, and nav-box link lists count the same as prose. Neither
+    is a tuning problem; embeddings simply do not have either failure.
+
+    Two stages, and the SUBQUERY IS LOAD-BEARING: the coarse HNSW (`vec256`) picks
+    a shortlist, the exact 1024-dim cosine reorders it. Written as a subquery
+    rather than a CTE because DuckDB's planner does not use the HNSW through a CTE
+    — the same trap recorded for this index's own build.
+
+    `archive` filters in the OUTER stage on purpose. Filtering inside the coarse
+    stage removes the index from the plan and turns the query into a scan of 1.73M
+    rows; filtering outside keeps the HNSW and just needs a wider shortlist, which
+    is why one is scaled from the other.
+    """
+    import duckdb
+    import corpus as C
+
+    path = index or VECTOR_INDEX
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"no passage index at {path}. Set $TIIBRARIAN_ZIM_INDEX, or use --mode fts "
+            f"for full-text retrieval that needs no index.")
+
+    qvec = C.embed_query(question)
+    own = con is None
+    con = con or duckdb.connect(path, read_only=True)
+    try:
+        con.execute("LOAD vss")
+        where, args = "", []
+        if archive:
+            where = "WHERE source = ?"
+            args = [archive]
+            shortlist = max(shortlist, topk * 200)   # the filter discards most of it
+        rows = con.execute(
+            "SELECT source, book, page, text, title, "
+            "       array_cosine_distance(vec, ?::FLOAT[1024]) AS dist "
+            "FROM (SELECT source, book, page, text, title, vec FROM pages "
+            "      ORDER BY array_cosine_distance(vec256, ?::FLOAT[256]) LIMIT ?) "
+            + where +
+            " ORDER BY dist LIMIT ?",
+            [qvec, qvec[:256], shortlist] + args + [topk]).fetchall()
+    finally:
+        if own:
+            con.close()
+
+    return [{"n": i + 1, "archive": src, "path": b, "chunk": pg,
+             "title": (t or b.replace("_", " ")), "text": txt,
+             "locator": locator_str(src, b), "score": 1.0 - d}
+            for i, (src, b, pg, txt, t, d) in enumerate(rows)]
+
+
 def hits_to_pages(hits):
     """Hits -> the adapter Documents `ground_answer`/C1 expect.
 
@@ -256,10 +325,26 @@ def quote_top_hit(question, hits, words=14):
              "cites": hits[0]["locator"]}]
 
 
-def ask_grounded(question, archive, synth=quote_top_hit, topk=5, max_relax=MAX_RELAX,
-                 titles=True):
-    """The loop. -> (grounded-answer-or-abstain, hits)."""
-    hits = retrieve(question, archive, topk, max_relax, titles=titles)
+def ask_grounded(question, archive=None, synth=quote_top_hit, topk=5,
+                 max_relax=MAX_RELAX, titles=True, mode="vector"):
+    """The loop. -> (grounded-answer-or-abstain, hits).
+
+    `mode` defaults to vector because that is the one that answers questions; fts
+    is kept because it needs no index and no device, which is what makes a
+    device-free run and a hermetic test possible.
+
+    In vector mode `archive` is optional and omitting it is usually right: the
+    index spans 19 corpora, so a question can be answered from wikibooks when
+    simple-wiki has nothing, and the locator still says which archive it came from.
+    """
+    if mode == "vector":
+        hits = vector_retrieve(question, archive, topk)
+    elif mode == "fts":
+        if not archive:
+            raise ValueError("fts mode searches ONE archive; pass archive=")
+        hits = retrieve(question, archive, topk, max_relax, titles=titles)
+    else:
+        raise ValueError(f"mode must be 'vector' or 'fts', got {mode!r}")
     pages = hits_to_pages(hits)
     return G.ground_answer(question, synth(question, hits), pages), hits
 
@@ -270,7 +355,10 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="grounded ask over the zimshelf")
     ap.add_argument("question", nargs="?")
-    ap.add_argument("--archive", help="archive id (filename without .zim)")
+    ap.add_argument("--archive", help="archive id; required for fts, optional filter for vector")
+    ap.add_argument("--mode", default="vector", choices=("vector", "fts"),
+                    help="vector: the passage index (answers questions). fts: the "
+                         "ZIM full-text index (no index file, no device, weaker)")
     ap.add_argument("--topk", type=int, default=5)
     ap.add_argument("--max-relax", default=MAX_RELAX, choices=("and-all", "and-drop1", "and-pairs"))
     ap.add_argument("--list", action="store_true", help="list the archives on the shelf")
@@ -283,8 +371,8 @@ if __name__ == "__main__":
         for aid, path in archives():
             print(f"{aid:52s} {os.path.getsize(path) / 1e9:8.2f} GB")
         raise SystemExit(0 if a.list else 2)
-    if not a.archive:
-        ap.error("--archive is required (see --list)")
+    if a.mode == "fts" and not a.archive:
+        ap.error("--archive is required for --mode fts (see --list)")
 
     synth = quote_top_hit
     if a.device:
@@ -292,7 +380,7 @@ if __name__ == "__main__":
         synth = S.device_synth
 
     result, hits = ask_grounded(a.question, a.archive, synth, a.topk, a.max_relax,
-                                titles=not a.no_titles)
+                                titles=not a.no_titles, mode=a.mode)
     for h in hits:
         print(f"  [{h['n']}] {h['locator']}  ({h['title']})")
     print(json.dumps(result, indent=1))
