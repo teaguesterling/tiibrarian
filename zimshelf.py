@@ -326,7 +326,7 @@ def quote_top_hit(question, hits, words=14):
 
 
 def ask_grounded(question, archive=None, synth=quote_top_hit, topk=5,
-                 max_relax=MAX_RELAX, titles=True, mode="vector"):
+                 max_relax=MAX_RELAX, titles=True, mode="vector", support=False):
     """The loop. -> (grounded-answer-or-abstain, hits).
 
     `mode` defaults to vector because that is the one that answers questions; fts
@@ -336,6 +336,11 @@ def ask_grounded(question, archive=None, synth=quote_top_hit, topk=5,
     In vector mode `archive` is optional and omitting it is usually right: the
     index spans 19 corpora, so a question can be answered from wikibooks when
     simple-wiki has nothing, and the locator still says which archive it came from.
+
+    `support` adds the C3 check — does the cited span actually STATE the claim? —
+    and is off by default because it needs the NPU and costs ~6-9 s per kept
+    claim (two askings of a 30B each). It annotates; it never drops a claim. See
+    `ground_answer.annotate_support`.
     """
     if mode == "vector":
         hits = vector_retrieve(question, archive, topk)
@@ -346,7 +351,13 @@ def ask_grounded(question, archive=None, synth=quote_top_hit, topk=5,
     else:
         raise ValueError(f"mode must be 'vector' or 'fts', got {mode!r}")
     pages = hits_to_pages(hits)
-    return G.ground_answer(question, synth(question, hits), pages), hits
+    result = G.ground_answer(question, synth(question, hits), pages)
+    if support:
+        # Imported HERE, not at module scope: c3 resolves CORDEXA_HOME and the
+        # device token at import, so a device-free run must not pay for it.
+        import c3
+        result = G.annotate_support(result, c3.check_kept)
+    return result, hits
 
 
 if __name__ == "__main__":
@@ -365,6 +376,9 @@ if __name__ == "__main__":
     ap.add_argument("--no-titles", action="store_true",
                     help="full-text only, no title-index blend (to measure what it buys)")
     ap.add_argument("--device", action="store_true", help="synthesize with the device LLM")
+    ap.add_argument("--support", action="store_true",
+                    help="C3: check each kept span actually STATES its claim "
+                         "(needs the NPU, ~6-9s per claim; annotates, never drops)")
     a = ap.parse_args()
 
     if a.list or not a.question:
@@ -380,7 +394,7 @@ if __name__ == "__main__":
         synth = S.device_synth
 
     result, hits = ask_grounded(a.question, a.archive, synth, a.topk, a.max_relax,
-                                titles=not a.no_titles, mode=a.mode)
+                                titles=not a.no_titles, mode=a.mode, support=a.support)
     for h in hits:
         print(f"  [{h['n']}] {h['locator']}  ({h['title']})")
     print(json.dumps(result, indent=1))

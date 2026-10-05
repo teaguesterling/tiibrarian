@@ -352,3 +352,42 @@ def ground_answer(question, claims, pages):
             "kept": kept, "dropped": dropped,
             "note": "Grounded = each kept span is verbatim on the page cited. "
                     "Support of claim by span is NOT checked here (C3, needs the device)."}
+
+
+def annotate_support(result, check_kept):
+    """Add C3 support verdicts to a grounded answer. ANNOTATES, NEVER GATES.
+
+    `check_kept` is passed in rather than imported so this stays device-free and
+    testable; the real one is `c3.check_kept`, which needs the NPU.
+
+    Not a gate, deliberately, and the reason is measured rather than cautious.
+    C3 is strong in one direction — 0/3 false-accepts across three runs,
+    including the ch2z_031 over-reach that C1 structurally cannot see — and
+    UNSTABLE in the other: the same span and claim, at temperature=0, returned
+    supported 4 times out of 6 consecutive runs (MEASUREMENT-c3.md, third run).
+    A split between the two askings resolves to `not supported`, so the
+    instability manufactures false negatives and never false positives.
+
+    That asymmetry is the whole argument. A gate would drop exactly the claims
+    the unstable direction produces, and the failure would be invisible: the
+    answer loses a true sentence and still reads as a clean grounded answer,
+    with no error anywhere to find. So a claim is MARKED, and a reader (or a
+    later gate, with repeats or a better model) decides.
+
+    An unmeasured check is not a negative verdict — `support_checked` stays False
+    and `supported` stays None. That mapping lives in `c3.check_kept`; this layer
+    only has to not undo it.
+
+    Returns a new result; the input is left alone.
+    """
+    out = dict(result)
+    if not result.get("kept"):
+        return out                      # an abstention has nothing to check — no device call
+    out["kept"] = check_kept(result["kept"])
+    out["note"] = (result.get("note", "").replace(
+        "Support of claim by span is NOT checked here (C3, needs the device).",
+        "Support of claim by span was checked (C3).")
+        + " C3 ANNOTATES: `supported: false` marks a claim, it does not drop it, "
+          "and `support_checked: false` means no verdict was reached — not a "
+          "negative one.")
+    return out

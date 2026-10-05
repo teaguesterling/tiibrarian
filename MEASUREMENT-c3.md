@@ -1,5 +1,54 @@
 # C3 support over answer claims — characterization (2026-09-05)
 
+## Third run, 2026-10-04 — and the recall figure is not a property of the case
+
+Re-run of the same six fixtures while wiring `--support` into `ask_grounded`,
+with the 30B and the embedder co-resident but no bulk job running (the woollama
+pool gate landed that day, so interactive calls queue instead of colliding):
+
+**measured 6/6 · false-accepts 0/3 · recall 3/3.** All twelve askings served by
+one value; 0/12 elaboration cuts; 4.8–8.1s per case.
+
+G2 — the paraphrase case that missed in *both* earlier runs, and which the "Next"
+section below therefore called the place "where the appliance's answers will feel
+it" — passed. G3 passed here too, but had just come back **not supported** from
+the identical span and claim inside the `annotate_support` end-to-end check,
+minutes earlier.
+
+So the same input gave two different verdicts. That was worth measuring rather
+than explaining away, and the measurement is the finding:
+
+| G3, identical span + claim, temperature=0, six consecutive runs |
+|---|
+| supported, supported, supported, supported, **not supported**, **not supported** |
+
+**4/6 supported.** In both flips, ordering A flipped and ordering B held — the
+double judge disagreed and `combine` resolved the disagreement conservatively.
+
+Three consequences:
+
+1. **"recall 2/3" was never a property of G2.** It is run-to-run variance on
+   whichever borderline case the dice land on, and an n=6 single run cannot tell
+   2/3 from 3/3. The three runs recorded here are 2/3, 2/3, 3/3 — consistent with
+   one unstable case out of three genuine ones, not with a specific weak case.
+   Any future rate needs repeats per case, not more cases.
+2. **The instability is in the safe direction.** `combine` resolves a split to
+   *not supported*, so a flip manufactures a false negative and never a false
+   positive. 0/3 false-accepts has held across all three runs. This is precisely
+   why the wiring annotates and does not gate: the unstable direction is the one
+   that would silently delete true claims from an answer.
+3. **A C3 verdict is not idempotent, and anything that re-runs one must say what
+   happens on a flip.** A consumer that replaces a stored verdict on re-run can
+   demote on the second look with no new evidence. Promotion on `supported` is
+   safe; *demotion* on a later `not supported` is not, because the later verdict
+   is not better-informed than the earlier one.
+
+Not established: whether the flip rate is specific to borderline paraphrase, what
+it is for clear-cut cases (G1 and O1 have never flipped, but have not been
+repeated either), or whether the longer latency on the two flipped runs (8.7s,
+8.6s vs ~6.7s) means anything. n=6 on one case.
+
+
 ## Second run, 13:29 — through cordexa's `check()`, in a serialized NPU window
 
 Reproducible: `c3_batch.py`, run in a serialized NPU window. **Reconstructed fixtures**
