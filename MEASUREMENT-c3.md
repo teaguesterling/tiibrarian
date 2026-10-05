@@ -43,10 +43,28 @@ Three consequences:
    safe; *demotion* on a later `not supported` is not, because the later verdict
    is not better-informed than the earlier one.
 
-Not established: whether the flip rate is specific to borderline paraphrase, what
-it is for clear-cut cases (G1 and O1 have never flipped, but have not been
-repeated either), or whether the longer latency on the two flipped runs (8.7s,
-8.6s vs ~6.7s) means anything. n=6 on one case.
+**The adverse cases were then repeated too, and they do not flip.** O1
+(over-reach) and R1 (refuted numeral), six runs each on identical input:
+12/12 `not supported`, and — the part that matters — **24/24 individual
+askings** said not supported. Not one split, not one near-miss.
+
+So the asymmetry is not merely an artefact of `combine` resolving splits
+conservatively. The adverse cases are stably separated; the instability is
+specific to borderline genuine paraphrase, where the two askings genuinely
+disagree. Cumulative adverse observations across all runs: 21, zero false
+accepts.
+
+This is what makes accumulating passes across repeated runs safe. A consumer
+that re-runs a batch and keeps every `supported` ever seen is ratcheting — and
+a ratchet ratchets errors too, permanently. That would be reckless on a
+0-out-of-9 bound (rule of three puts the true rate as high as ~33%). It is
+defensible here because the adverse cases show no instability to accumulate,
+not because the observed count is zero.
+
+Still not established: the flip rate for clear-cut *genuine* cases (G1 has
+never flipped but has not been repeated), whether the longer latency on the two
+flipped runs (8.7s, 8.6s vs ~6.7s) means anything, and whether paraphrase
+instability varies by domain. n=6 per case, three cases repeated.
 
 
 ## Second run, 13:29 — through cordexa's `check()`, in a serialized NPU window
