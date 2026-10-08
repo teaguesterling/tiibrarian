@@ -25,6 +25,10 @@ correctly-cited span can still be over-reached (page says "drying", claim says
 the model. tiibrarian keeps such a claim, flagged `support_checked: False`, and
 never renders "grounded" to a reader as "true." See `CONTRACT.md`.
 
+C3 is implemented and available as `zimshelf.py --support`. It **annotates and
+never drops a claim** — see "C3 — and why it annotates rather than gates" below
+for the measurements that forced that choice.
+
 ## The NPU is the final substrate — this is not optional
 
 The production librarian runs **on the NPU**: the query is embedded on-device,
@@ -52,13 +56,26 @@ Everything else here is a stand-in for the NPU until the embeddings run finishes
 
 ```
 ground_answer.py   the verifier: claims + retrieved pages -> grounded | abstain
+                   plus annotate_support(), which adds C3 verdicts WITHOUT gating
 seam.py            the loop over an fts corpus: retrieve -> synthesize -> ground
 corpus.py          the loop over the NPU vector index: two-stage cosine + the same grounding
+zimshelf.py        the same loop over the offline ZIM archives, via
+                   DuckDB's zim extension -- `--mode vector` is the one that
+                   answers questions; `--mode fts` needs no index and no device
 synth.py           the device's LLM, answering in claims the grounding layer can check
+c3.py              C3 support: does the cited span actually STATE the claim?
+                   cordexa's double judge, run through cordexa's own check()
+c3_batch.py        re-runnable C3 characterization -- the numbers in MEASUREMENT-c3.md
+c3_cards.py        C3 over a batch of cards from another system, as a file handoff
+c3_rerun.py        the same, N times per card, returning the union of passes + a tally
+continuity.py      locator stability across a rebuild
 locator.py         naming a passage in any format, and whether it can be read back
+cordexa_home.py    finding the cordexa checkout this layer borrows from
 CONTRACT.md        the answer-grounding contract
-test_ground_answer.py, test_seam.py   hermetic (no device, no network)
+MEASUREMENT-c3.md  what C3 actually does on this device, measured three times
+test_*.py          hermetic unless named otherwise (no device, no network)
 test_corpus.py     integration; skipped unless the vector index is present
+test_c3.py         needs the device; skips loudly without it
 ```
 
 ## Run
@@ -75,6 +92,18 @@ CORDEXA_HOME=~/Projects/cordexa python3 seam.py "what is duckdb" \
 # the question: TIINY_AUTH_KEY + the NPU embedder)
 CORDEXA_HOME=~/Projects/cordexa TIINY_AUTH_KEY=... python3 corpus.py \
     "how do you can green beans without a pressure canner"
+
+# the ZIM shelf. vector mode answers questions; fts needs no index and no device.
+# NOTE two different counts: `--list` shows the ARCHIVES present on disk (14),
+# while the vector index spans 19 SOURCES -- some were embedded from archives
+# that are no longer on the shelf, and a question can be answered from any of them.
+CORDEXA_HOME=~/Projects/cordexa/main python3 zimshelf.py --list
+CORDEXA_HOME=~/Projects/cordexa/main python3 zimshelf.py \
+    "why does drying preserve food"
+
+# ...and with C3 support annotation (needs the device's 30B, ~6-9s per claim)
+CORDEXA_HOME=~/Projects/cordexa/main python3 zimshelf.py --support \
+    "why does drying preserve food"
 ```
 
 **The query must be embedded by the same encoder that built the index** — the device's
@@ -147,16 +176,55 @@ and `ground_answer` parses it into the structured identity the comparison uses.
 
 Pairs with `tiiny-duckdb-rag` (the retrieval/ask loop) and `TTt` (device tooling).
 
-## When the device frees
+## C3 — and why it annotates rather than gates
 
-`retrieve()` and `synth` are both done — `corpus.py` is the vector backend and
-`synth.py` asks the device's LLM. **One thing remains:**
+The `support_checked: False` gap is closed. `c3.py` runs cordexa's double judge
+against the device's 30B, and `ground_answer.annotate_support(result, check_kept)`
+attaches the verdicts to a grounded answer. `zimshelf.py --support` wires it up:
 
-**C3 support over the answer claims** — does the grounded span actually *support* the
-spoken claim — which closes the `support_checked: False` gap. C1 can only say the words
-are really on the page cited; whether they hold the claim up is a judgement that needs
-the model.
+```bash
+CORDEXA_HOME=~/Projects/cordexa/main python3 zimshelf.py --support \
+    "how do you dry food without a dehydrator"
+```
 
-The full loop now runs on the device: embed the question on the NPU → two-stage cosine
+**It annotates. It never drops a claim**, and that is a measured decision rather
+than caution. Across three characterization runs C3 produced **0 false accepts
+out of 3 adverse cases every time**, and repeating the adverse fixtures gave
+12/12 `not supported` over **24/24 individual askings — not one split**. But a
+borderline *genuine* paraphrase is unstable: the same span and claim at
+temperature 0 returned `supported` on only **4 of 6 consecutive runs**, because
+the two askings honestly disagree and `combine` resolves a split conservatively.
+
+So the instability manufactures false negatives and never false positives. A
+gate would therefore delete true claims at that rate, and the failure would be
+invisible — the answer loses a correct sentence and still reads clean. A claim
+is marked; a reader, or a later gate with repeats or a better model, decides.
+`test_support_annotation.py` pins this and is mutation-checked: an
+implementation that filters `supported: False` fails it.
+
+`support_checked: False` still means **no verdict was reached** — device down,
+gateway cut, no ANSWER line, or the served model changed between askings. It
+never means "not supported". See MEASUREMENT-c3.md for all three runs, including
+a correction: "recall 2/3" was never a property of one fixture, it is run-to-run
+variance, and an n=6 single run cannot distinguish 2/3 from 3/3.
+
+### Handing C3 to another system
+
+`c3_cards.py` takes `{card_id, claim, span, content_sha256}` and returns a
+verdict per card; `c3_rerun.py` does N passes and returns the union of passes
+with a `k/3` tally. The `content_sha256` is echoed back **unexamined** — it is a
+token the caller issued and verifies on ingest, so this side cannot assert that
+a span is the one the caller grounded on.
+
+The device call is deliberately **not** injectable. Four guards live in it that
+are specific to this appliance: the served-model identity cross-check (a chat
+completion here reports a generic `../model/model.q8_0.gguf` whatever is loaded,
+so cordexa's own identity test is weak and `c3_batch.py` compensates against the
+management API), the ~60s bodiless-504 gateway budget, retry-transport-only so a
+reply that *arrived* is never re-asked, and the unparseable-but-complete →
+unmeasured override. An injected `ask` loses all four, silently.
+
+The full loop runs on the device: embed the question on the NPU → two-stage cosine
 over the page vectors → the device's LLM writes claims that quote and cite → mechanical
-grounding drops anything not verbatim on the page cited → answer, or abstain.
+grounding drops anything not verbatim on the page cited → C3 annotates what survives
+→ answer, or abstain.
