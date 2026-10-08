@@ -119,9 +119,19 @@ def page_ident(hit):
     sides share, and a citation that arrived as a locator string parses to `{"doc":
     ...}` alone. Without `doc` here the intersection is empty, every claim fails to
     match its page, and the librarian abstains on answers that were in fact correct.
+
+    `page` IS the passage ordinal, and without it this seam was broken for the
+    common case. `vector_retrieve` returns CHUNKS, and several of them are
+    routinely from one article -- topk defaults to 5 over a 1.73M-chunk index. Two
+    chunks of one article then produced byte-identical identities, `_same_page`
+    matched a citation to both, and `ground_answer` dropped a correctly-quoted,
+    correctly-cited claim as `ambiguous`. corpus.py:35 had already written the fix
+    down for its own corpus -- "when passages become sub-page (Wikipedia articles,
+    Gutenberg chapters), add chapter, section or a passage ordinal so a citation
+    can still name exactly one passage" -- and this is exactly that case.
     """
     return {"kind": KIND, "id": hit["archive"], "path": hit["path"],
-            "doc": hit["locator"]}
+            "doc": hit["locator"], "page": hit["chunk"]}
 
 
 def _html(con, path, entry):
@@ -321,8 +331,13 @@ def quote_top_hit(question, hits, words=14):
     if not hits:
         return []
     span = " ".join(hits[0]["text"].split()[:words])
+    # Cite the STRUCTURED identity, not the bare locator string. A locator names
+    # the article; the claim is about one passage in it, and a doc-only citation
+    # cannot name which -- so it matches every retrieved chunk of that article and
+    # `ground_answer` calls the claim ambiguous. A model that emits a bare string
+    # still hits that limit; see the note in `page_ident`.
     return [{"text": f"(answer to {question!r})", "span": span,
-             "cites": hits[0]["locator"]}]
+             "cites": page_ident(hits[0])}]
 
 
 def ask_grounded(question, archive=None, synth=quote_top_hit, topk=5,
