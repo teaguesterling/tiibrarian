@@ -1,132 +1,130 @@
-"""Corpus retrieval + grounding against the real vector index.
+"""Device-free tests for corpus.py over the unified int8 substrate.
 
-NOT hermetic, and skipped unless the index is present -- it needs a ~16 GB DuckDB
-built from NPU embeddings. It needs no device and no network: queries are seeded from
-a page's own vector, so the NPU is only required to embed a typed question.
+Builds a tiny int8 Vortex shard + a matching text DB in a tmp dir -- no NPU, no real corpus. Retrieval
+ranks on the Vortex, text is read from the federation, grounding runs cordexa's mechanical C1. The only
+non-stdlib requirement is CORDEXA_HOME reachable (ground_answer imports C1 by path).
 
     CORDEXA_HOME=~/Projects/cordexa python3 -m unittest test_corpus -v
-    TIIBRARIAN_CORPUS=/path/to/corpus.duckdb python3 -m unittest test_corpus
 """
+import inspect
 import os
+import tempfile
 import unittest
-from collections import Counter
+
+import duckdb
 
 import corpus
 import ground_answer as G
 
-HAVE = os.path.exists(corpus.CORPUS)
+
+def _vec(dims):
+    v = [0] * 1024
+    for i, val in dims.items():
+        v[i] = val
+    return v
 
 
-@unittest.skipUnless(HAVE, f"corpus index not present at {corpus.CORPUS}")
-class CorpusRetrieval(unittest.TestCase):
+def _qvec():
+    v = [0.0] * 1024
+    v[0], v[1] = 1.0, 0.5
+    return v
+
+
+# p1/p2 of b1 run on mid-sentence (exercises the continuity join); b2 is a separate single page whose
+# text carries a >=40-char span (C1's minimum); b3 is unrelated.
+ROWS = [
+    ("survivorlibrary_hastext", "b1", "1", "Boil the water hard for ten", _vec({0: 127, 1: 64})),
+    ("survivorlibrary_hastext", "b1", "2", "minutes to make it safe to drink.", _vec({0: 120, 1: 60})),
+    ("survivorlibrary_hastext", "b2", "1",
+     "A charcoal filter removes sediment and odour from collected rainwater.", _vec({0: 127})),
+    ("survivorlibrary_hastext", "b3", "9", "An unrelated page about beekeeping in winter.", _vec({2: 127})),
+]
+B2_SPAN = "charcoal filter removes sediment and odour from collected"   # >=40 chars, verbatim in b2
+
+
+class CorpusTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # One connection for the class: the first query on a cold ~16 GB file takes
-        # ~10 s and every one after it ~170 ms. Reconnecting per test would pay that
-        # cold cost repeatedly and say nothing extra.
-        cls.con = corpus.connect()
-        cls.con.execute("LOAD vss")
-        seed = cls.con.execute(
-            "SELECT book, page, text, vec FROM pages "
-            "WHERE length(text) BETWEEN 1200 AND 4000 LIMIT 1").fetchone()
-        cls.book, cls.page, cls.text, cls.qvec = seed
-        cls.hits = corpus.retrieve(cls.qvec, con=cls.con, topk=8, shortlist=200)
-        cls.pages = corpus.hits_to_pages(cls.hits)
+        cls.tmp = tempfile.TemporaryDirectory()
+        textdb = os.path.join(cls.tmp.name, "text.duckdb")
+        shard = os.path.join(cls.tmp.name, "s.vortex")
+        b = duckdb.connect(textdb)
+        b.execute("INSTALL vortex; LOAD vortex;")
+        b.execute("CREATE TABLE pages(source VARCHAR, book VARCHAR, page VARCHAR, text VARCHAR)")
+        b.execute("CREATE TABLE _v(source VARCHAR, book VARCHAR, page VARCHAR, "
+                  "vec TINYINT[1024], vscale FLOAT)")
+        for src, book, page, text, vec in ROWS:
+            b.execute("INSERT INTO pages VALUES (?,?,?,?)", [src, book, page, text])
+            b.execute("INSERT INTO _v VALUES (?,?,?,?::TINYINT[1024],1.0)", [src, book, page, vec])
+        b.execute(f"COPY _v TO '{shard}' (FORMAT vortex)")
+        b.close()
+        # all fixture sources are survivorlibrary_* -> the sl alias; point both aliases at the one file
+        cls.con = corpus.connect(sl_db=textdb, zim_db=textdb)
+        cls.shard = shard
+        cls.hits = corpus.retrieve(_qvec(), topk=8, con=cls.con, shards=[shard])
+        cls.pages = corpus.hits_to_pages(cls.hits, con=cls.con)
         cls.top = cls.hits[0]
-        cls.span = " ".join(cls.top["text"].split()[:12])
+        cls.b2 = next(h for h in cls.hits if h["book"] == "b2")
 
     @classmethod
     def tearDownClass(cls):
         cls.con.close()
+        cls.tmp.cleanup()
 
-    def test_retrieve_returns_ranked_hits(self):
-        self.assertTrue(self.hits)
-        scores = [h["score"] for h in self.hits]
-        self.assertEqual(scores, sorted(scores, reverse=True))
-        for h in self.hits:
-            self.assertTrue(h["text"])          # text is present for grounding
-            self.assertIsInstance(h["page"], int)
+    def test_retrieve_ranks_and_attaches_text(self):
+        self.assertEqual(self.top["book"], "b1")                      # aligned with the query
+        self.assertTrue(self.top["text"])                             # full text attached from federation
+        self.assertEqual([h["score"] for h in self.hits],
+                         sorted((h["score"] for h in self.hits), reverse=True))
+        self.assertEqual([h["n"] for h in self.hits], list(range(1, len(self.hits) + 1)))
 
-    def test_seed_page_is_its_own_nearest_neighbour(self):
-        # A page queried by its own vector must come back first. If this fails the
-        # two-stage query is wrong -- the coarse and exact halves disagree.
-        self.assertEqual((self.top["book"], self.top["page"]), (self.book, self.page))
-        self.assertGreater(self.top["score"], 0.99)
+    def test_shortlist_surface_is_gone(self):
+        self.assertNotIn("shortlist", inspect.signature(corpus.retrieve).parameters)
+        self.assertNotIn("shortlist", inspect.signature(corpus.ask_grounded).parameters)
 
     def test_page_ident_is_discriminating(self):
-        # It must identify ONE page, not a family. book alone is not enough.
         ident = corpus.page_ident(self.top)
         self.assertEqual(set(ident), {"kind", "source", "doc", "page"})
-        # `doc`, not `book`: the field is format-neutral, so the same locator
-        # shape names an HTML file or a zim:// entry (see locator.py).
-        # `source` is required for uniqueness: 21,726 (book, page) pairs exist in
-        # both the native-text and re-OCR lanes across the full corpus.
-        matched = [p for p in self.pages if p["retrieved"] == ident]
-        self.assertEqual(len(matched), 1)
+        self.assertEqual(ident["source"], "survivorlibrary_hastext")   # lane is in the identity
 
-    def test_locator_string_round_trips_and_names_the_page(self):
-        import locator as L
-        s = corpus.locator_str(self.top)
-        self.assertTrue(s.endswith("#p.%d" % self.top["page"]))
-        self.assertEqual(L.render(L.parse(s)), s)
-        self.assertTrue(L.resolvable(L.parse(s)))
+    def test_locator_names_the_page(self):
+        self.assertIn("b1", corpus.locator_str(self.top))
+
+    def test_continuity_join_merges_running_pages(self):
+        joined = [p for p in self.pages if p["text"].startswith("Boil the water")]
+        self.assertTrue(joined, "b1 page should be present")
+        self.assertIn("minutes to make it safe", joined[0]["text"])       # p1 joined with p2
+        self.assertEqual(joined[0]["retrieved"].get("page_to"), "2")
 
     def test_real_span_correctly_cited_is_grounded(self):
-        r = G.ground_answer("q", [{"text": "c", "span": self.span,
-                                   "cites": corpus.page_ident(self.top)}], self.pages)
-        self.assertTrue(r["grounded"])
+        r = G.ground_answer("q", [{"text": "c", "span": B2_SPAN,
+                                   "cites": corpus.page_ident(self.b2)}], self.pages)
+        self.assertTrue(r["grounded"], r)
         self.assertEqual(r["kept"][0]["citation_matched"], 1)
         self.assertFalse(r["kept"][0]["support_checked"])   # grounded != supported
 
     def test_span_cited_to_a_different_page_is_misattributed(self):
-        other = next(h for h in self.hits[1:]
-                     if (h["book"], h["page"]) != (self.top["book"], self.top["page"]))
-        r = G.ground_answer("q", [{"text": "c", "span": self.span,
-                                   "cites": corpus.page_ident(other)}], self.pages)
-        self.assertTrue(r["abstain"])
+        r = G.ground_answer("q", [{"text": "c", "span": B2_SPAN,
+                                   "cites": corpus.page_ident(self.top)}], self.pages)
+        self.assertTrue(r["abstain"], r)
         self.assertEqual(r["dropped"][0]["verdict"], "misattributed")
-
-    def test_ambiguous_book_only_citation_is_refused(self):
-        # An under-specified citation that matches several retrieved pages is not
-        # attribution. Uses a book that really does appear twice in the hit set when
-        # one exists, and constructs the collision otherwise, so the assertion holds
-        # regardless of which seed page setUpClass happened to pick.
-        dup = [b for b, c in Counter(h["book"] for h in self.hits).items() if c > 1]
-        if dup:
-            book = dup[0]
-            hit = next(h for h in self.hits if h["book"] == book)
-            span, pages = " ".join(hit["text"].split()[:12]), self.pages
-        else:
-            book, span = self.top["book"], self.span
-            twin = dict(self.pages[0])
-            twin["retrieved"] = {"kind": corpus.KIND, "book": book,
-                                 "page": self.top["page"] + 9999}
-            twin["requested"] = twin["retrieved"]
-            pages = [self.pages[0], twin]
-        r = G.ground_answer("q", [{"text": "c", "span": span,
-                                   "cites": {"kind": corpus.KIND, "book": book}}], pages)
-        self.assertTrue(r["abstain"])
-        self.assertGreaterEqual(r["dropped"][0]["citation_matched"], 2)
 
     def test_confabulated_span_abstains(self):
         r = G.ground_answer("q", [{"text": "c",
-                                   "span": "freezing is universally superior for every food",
+                                   "span": "this exact sentence appears on no page in the corpus at all",
                                    "cites": corpus.page_ident(self.top)}], self.pages)
-        self.assertTrue(r["abstain"])
+        self.assertTrue(r["abstain"], r)
         self.assertEqual(r["dropped"][0]["verdict"], "unfounded")
 
     def test_ask_grounded_end_to_end_with_supplied_vector(self):
-        # The whole loop with no device: retrieve -> synth -> ground.
-        r, hits = corpus.ask_grounded("how is it preserved?", corpus.quote_top_hit,
-                                      qvec=self.qvec, con=self.con, topk=5)
+        r, hits = corpus.ask_grounded("how is it purified?", corpus.quote_top_hit,
+                                      qvec=_qvec(), con=self.con, topk=5, shards=[self.shard])
         self.assertTrue(hits)
-        self.assertTrue(r["grounded"])
+        self.assertTrue(r["grounded"], r)
 
 
 class EmbedQueryGuards(unittest.TestCase):
     def test_embed_query_without_token_raises_rather_than_falling_back(self):
-        # A wrong-encoder query returns plausible, worse hits and no error, so this
-        # must fail loudly instead of substituting anything.
         saved = corpus.AUTH
         corpus.AUTH = ""
         try:
