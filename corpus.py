@@ -1,39 +1,48 @@
-"""Vector retrieval over a SurvivorLibrary corpus `.duckdb`, feeding `ground_answer`.
+"""Vector retrieval over the unified int8 substrate, feeding `ground_answer`.
 
 `seam.py` retrieves with DuckDB fts over a small docs corpus -- real retrieval, no
 device, good for tests. This is the other backend: cosine over page vectors embedded
 on the Tiiny's NPU, which is what the appliance actually runs.
 
-TWO-STAGE, and both halves are load-bearing (measured on 1,310,336 real pages):
-  1. coarse: HNSW over a stored 256-d truncation of each vector
-  2. exact:  re-rank the shortlist on the full 1024-d vector
-Recall against exact search is 0.987 at shortlist 100 and 0.996 at 200, so the default
-is 200. The coarse index is a quarter the size of a full-precision one.
+SINGLE-STAGE int8 (2026-10-18; replaced the two-stage coarse->exact FLOAT+VSS path).
+Ranking is brute-force cosine over int8 `vec TINYINT[1024]` Vortex shards, delegated
+to cordexa `reference/retrieve_int8.py`. Why single-stage: for int8 a 256-d coarse
+pass costs MORE than the exact scan (the stored array can't be cheaply sliced, and the
+slice-then-cast is the DuckDB 1.5.6 segfault path), and quantisation recall (~.997) x
+HNSW approximation recall multiply if stacked. Brute-force int8 has no index error and
+runs ~2.4M rows/s; measured R@10 vs float32 ~.997. There is NO `shortlist` any more.
+
+RETRIEVE ROUGH, GROUND EXACT. The int8 vectors embed only a truncated prefix of each
+page, so ranking is rough. The page TEXT the grounding reads does NOT come from the
+vector store (the Vortex has none) -- it comes from the federated text DBs, the WHOLE
+verbatim page. So truncation costs recall, never correctness.
 
 THREE THINGS THAT LOOK LIKE STYLE AND ARE NOT:
-
-* The re-rank is a SUBQUERY, never a CTE. A CTE defeats DuckDB's HNSW optimizer and the
-  coarse step silently becomes a full scan -- measured 2.8 s versus 31 ms. Same reason
-  the truncation is a materialised column: VSS ignores the index on a
-  `GENERATED ... VIRTUAL` column, with no error, just a seq scan.
 
 * The query MUST be embedded by the SAME encoder that built the index -- the NPU
   embedder, not the device's CPU one. Same model, different backends: cosine between
   their outputs is ~0.97 and the CPU's are L2-normalised while the NPU's are raw
-  (norm ~100). Mixing them does not fail, it just quietly retrieves worse.
+  (norm ~100). Mixing them does not fail, it just quietly retrieves worse. (A CPU
+  Qwen3-Embedding-0.6B-Q8 built the substrate vectors un-normalised, so a CPU-profile
+  caller that embeds queries the same way is consistent; the guard is against mixing.)
 
 * Page identity is `{kind, source, book, page}`. `source` is the extraction lane the
   page came from, and it is NOT decoration: re-OCR fixes bad pages inside books that
   already had a text layer, so the same (book, page) exists in two lanes with different
   text. Measured on the full corpus: 21,726 (book, page) pairs appear in BOTH the
-  native-text and re-OCR lanes. Without `source` the locator is not unique and those
-  pages would resolve ambiguously the moment the OCR lanes are embedded. The test index
-  is 100% native text, which is exactly why this would not have shown up in testing.
+  native-text and re-OCR lanes. Without `source` the locator is not unique. `source`
+  is in the Vortex key AND the federation key, so it survives the whole path.
 
   The locator carries the finest position the index has, and is meant to grow: when
   passages become sub-page (Wikipedia articles, Gutenberg chapters), add `chapter`,
   `section` or a passage ordinal so a citation can still name exactly one passage.
+
+* A page that runs on into the next is handed to C1 JOINED (see `hits_to_pages`), so a
+  quotation crossing the page break can be verified at all -- 48.7% of adjacent page
+  pairs cut a sentence. This is the load-bearing half of "ground exact" and is
+  unchanged by the retrieval swap; it now reads its text from the federation.
 """
+import importlib.util
 import json
 import os
 import urllib.request
@@ -44,15 +53,36 @@ import continuity
 import ground_answer as G
 import locator
 
-CORPUS = os.environ.get(
-    "TIIBRARIAN_CORPUS",
-    os.path.expanduser("~/corpus/survivorlibrary-testset.duckdb"))
+# int8 ranking lives in cordexa (the substrate owner). Locate the checkout via the shared
+# `cordexa_home` helper (same path ground_answer's C1 and c3 resolve; handles the git-wt shape),
+# then import retrieve_int8 by file, as ground_answer imports c1_span.
+import cordexa_home   # noqa: E402  (tiibrarian flat module)
+
+
+def _load_retrieve_int8():
+    root = cordexa_home.find(os.path.join("reference", "retrieve_int8.py"))
+    path = os.path.join(root, "reference", "retrieve_int8.py")
+    spec = importlib.util.spec_from_file_location("cordexa_retrieve_int8", path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+_R = _load_retrieve_int8()
+
+# The int8 Vortex shards (ranking) and the federation text DBs (grounding). Both on nvme2 by default;
+# colon-delimited override. Text is routed by source prefix: survivorlibrary_* -> the SL DB, else the zim DB.
+SHARDS = os.environ.get(
+    "TIIBRARIAN_VORTEX_SHARDS",
+    "/srv/logical/opt/teague/corpus/survivorlibrary_vectors.vortex:"
+    "/srv/logical/opt/teague/corpus/zim_vectors.vortex").split(":")
+SL_DB = os.environ.get("TIIBRARIAN_SL_DB", "/srv/logical/opt/teague/corpus/survivorlibrary.duckdb")
+ZIM_DB = os.environ.get("TIIBRARIAN_ZIM_DB", os.path.expanduser("~/corpus/zim-corpora.duckdb"))
 EMBED_URL = os.environ.get("TIINY_EMBED_URL", "http://api.tiiny/v1/embeddings")
 AUTH = os.environ.get("TIINY_AUTH_KEY", "")
 MODEL = os.environ.get("TIINY_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
 
 DIM = 1024
-COARSE = 256
 KIND = "survivorlibrary"
 
 
@@ -78,32 +108,52 @@ def embed_query(text, timeout=60):
     return vec
 
 
-def connect(db=None):
-    return duckdb.connect(db or CORPUS, read_only=True)
+def connect(sl_db=None, zim_db=None):
+    """An in-memory connection with the Vortex ext loaded and the text DBs attached read-only.
+
+    Ranking reads the int8 Vortex shards (`read_vortex`, paths passed to `retrieve`); grounding reads
+    page text from the attached federation DBs (`sl.pages` / `z.pages`, routed by source prefix).
+    """
+    con = duckdb.connect()
+    con.execute("INSTALL vortex; LOAD vortex;")
+    con.execute(f"ATTACH '{sl_db or SL_DB}' AS sl (READ_ONLY);")
+    con.execute(f"ATTACH '{zim_db or ZIM_DB}' AS z (READ_ONLY);")
+    return con
 
 
-def retrieve(qvec, db=None, topk=8, shortlist=200, con=None):
-    """Two-stage vector retrieval. -> hits, best first."""
+def _text(con, source, book, page):
+    """The full verbatim page text from the federation, routed by source prefix. -> str|None."""
+    tbl = "sl.pages" if source.startswith("survivorlibrary_") else "z.pages"
+    row = con.execute(
+        f"SELECT text FROM {tbl} WHERE source = ? AND book = ? AND CAST(page AS VARCHAR) = ?",
+        [source, book, str(page)]).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def retrieve(qvec, topk=8, con=None, shards=None):
+    """Single-stage int8 vector retrieval, text attached from the federation. -> hits, best first.
+
+    Ranking is cordexa `retrieve_int8` over the Vortex `shards` (default `SHARDS`; rough, truncated
+    vectors); each hit's FULL verbatim text is then read from the federation (`_text`). A hit whose page
+    has no text is dropped -- a miss is a value. The hit shape (n, source, book, page, text, score) is
+    unchanged, so `hits_to_pages` / `next_page` / `page_ident` downstream are untouched.
+    """
     if len(qvec) != DIM:
         raise ValueError(f"query vector has {len(qvec)} dims, index expects {DIM}")
     own = con is None
-    con = con or connect(db)
+    con = con or connect()
     try:
-        con.execute("LOAD vss")
-        rows = con.execute(
-            # SUBQUERY, NOT A CTE -- see the module docstring.
-            "SELECT source, book, page, text, "
-            "       array_cosine_distance(vec, ?::FLOAT[{d}]) AS dist "
-            "FROM (SELECT source, book, page, text, vec FROM pages "
-            "      ORDER BY array_cosine_distance(vec256, ?::FLOAT[{c}]) LIMIT ?) "
-            "ORDER BY dist LIMIT ?".format(d=DIM, c=COARSE),
-            [qvec, qvec[:COARSE], shortlist, topk]).fetchall()
+        ranked = _R.retrieve(con, qvec, shards or SHARDS, topk=topk)
+        out = []
+        for h in ranked:
+            t = _text(con, h["source"], h["book"], h["page"])
+            if t and t.strip():
+                out.append({"n": len(out) + 1, "source": h["source"], "book": h["book"],
+                            "page": h["page"], "text": t, "score": h["score"]})
     finally:
         if own:
             con.close()
-    return [{"n": i + 1, "source": src, "book": b, "page": p, "text": t,
-             "score": 1.0 - d}
-            for i, (src, b, p, t, d) in enumerate(rows)]
+    return out
 
 
 def page_ident(hit):
@@ -134,17 +184,25 @@ def span_ident(hit, page_to):
     return d
 
 
+def _page_plus_one(page):
+    """The next page token, or None when the page is not an integer token (don't guess an order)."""
+    s = str(page)
+    return str(int(s) + 1) if s.lstrip("-").isdigit() else None
+
+
 def next_page(con, hit):
     """The page after this hit, from the same book AND THE SAME LANE. -> text|None.
 
     Same lane matters: the corpus holds 21,726 (book, page) pairs in both the
     native-text and re-OCR lanes, so dropping `source` here would join a page to
-    a different transcription of its neighbour.
+    a different transcription of its neighbour. A non-integer page token (SL tokens
+    are not guaranteed contiguous) yields None -- a missed join costs one claim; a
+    wrong join corrupts the answer, so when the order is unknown we do not join.
     """
-    row = con.execute(
-        "SELECT text FROM pages WHERE source = ? AND book = ? AND page = ?",
-        [hit["source"], hit["book"], hit["page"] + 1]).fetchone()
-    return row[0] if row else None
+    nxt = _page_plus_one(hit["page"])
+    if nxt is None:
+        return None
+    return _text(con, hit["source"], hit["book"], nxt)
 
 
 def hits_to_pages(hits, con=None):
@@ -173,7 +231,8 @@ def hits_to_pages(hits, con=None):
         if nxt and continuity.continues(h["text"], nxt)[0]:
             joined = dict(one)
             joined["text"] = h["text"] + "\n" + nxt
-            joined["requested"] = joined["retrieved"] = span_ident(h, h["page"] + 1)
+            nxt_token = _page_plus_one(h["page"])
+            joined["requested"] = joined["retrieved"] = span_ident(h, nxt_token)
             joined["parts"] = [one]
             docs.append(joined)
         else:
@@ -181,7 +240,7 @@ def hits_to_pages(hits, con=None):
     return docs
 
 
-def ask_grounded(question, synth, db=None, topk=8, shortlist=200, qvec=None, con=None):
+def ask_grounded(question, synth, topk=8, qvec=None, con=None, shards=None):
     """question -> retrieve -> synthesize -> ground. -> (answer|abstain, hits).
 
     `qvec` lets a caller supply the embedding (a device-free test, or a
@@ -190,9 +249,9 @@ def ask_grounded(question, synth, db=None, topk=8, shortlist=200, qvec=None, con
     if qvec is None:
         qvec = embed_query(question)
     own = con is None
-    con = con or connect(db)
+    con = con or connect()
     try:
-        hits = retrieve(qvec, topk=topk, shortlist=shortlist, con=con)
+        hits = retrieve(qvec, topk=topk, con=con, shards=shards)
         pages = hits_to_pages(hits, con=con)
     finally:
         if own:
@@ -211,11 +270,9 @@ def quote_top_hit(question, hits, words=14):
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="grounded ask over the corpus index")
+    ap = argparse.ArgumentParser(description="grounded ask over the unified int8 substrate")
     ap.add_argument("question")
-    ap.add_argument("--db", default=None)
     ap.add_argument("--topk", type=int, default=8)
-    ap.add_argument("--shortlist", type=int, default=200)
     ap.add_argument("--mock", action="store_true",
                     help="quote the top hit instead of asking the device's LLM")
     a = ap.parse_args()
@@ -224,8 +281,7 @@ if __name__ == "__main__":
     else:
         import synth
         chosen = synth.device_synth
-    result, hits = ask_grounded(a.question, chosen, db=a.db,
-                                topk=a.topk, shortlist=a.shortlist)
+    result, hits = ask_grounded(a.question, chosen, topk=a.topk)
     for h in hits:
         print(f"[{h['n']}] {h['score']:.3f}  {h['book'][:56]} p.{h['page']}")
     print(json.dumps(result, indent=1)[:1200])
