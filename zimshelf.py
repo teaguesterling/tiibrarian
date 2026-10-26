@@ -245,14 +245,75 @@ def retrieve(question, archive, topk=5, max_relax=MAX_RELAX, titles=True, title_
     return hits
 
 
-#: The passage index built from the shelf: 1.73M chunks over 19 corpora, Qwen3
-#: embeddings, an HNSW on the 256-dim truncation. Built already; this layer reads it.
-VECTOR_INDEX = os.environ.get(
-    "TIIBRARIAN_ZIM_INDEX", os.path.expanduser("~/corpus/zim-corpora.duckdb"))
+#: The int8 Vortex shards this shelf ranks. `corpus.SHARDS` also carries
+#: survivorlibrary's 12.9 GB of scanned manuals, which are not on this shelf, so the
+#: shelf names its own and they are the ZIM side of the federation only. Add the
+#: Wikipedia shard here to put its 14.2M chunks on the shelf -- and set
+#: $TIIBRARIAN_WIKI_DB along with it, or `corpus._route` raises rather than let every
+#: wiki hit fall through to a DB that does not hold it.
+SHARDS = os.environ.get(
+    "TIIBRARIAN_ZIM_SHARDS",
+    "/srv/logical/opt/teague/corpus/zim_vectors.vortex").split(":")
+
+def _ordinal(page):
+    """corpus's `page` -> the INT passage ordinal this module cites.
+
+    THE TYPE SEAM BETWEEN THE TWO LAYERS, and it is load-bearing. corpus.py keys
+    `page` as a VARCHAR because that is how the Vortex shards store it (measured:
+    both shards yield '0', not 0), and its citation vocabulary is strings
+    throughout -- `_page_plus_one` returns `str(int(s) + 1)`. zimshelf's is ints,
+    read from `z.pages.page` BIGINT and pinned by
+    `test_identity_carries_the_passage_ordinal`.
+
+    `ground_answer._same_page` compares with a bare `==`. Carrying '7' into a
+    citation therefore makes `"7" == 7` False and drops a correctly quoted,
+    correctly cited claim -- the same silent failure 3ff1463 fixed, reached from
+    the other side. Converting here keeps both vocabularies intact.
+
+    Raises rather than passing a non-ordinal through, because that degrade is
+    invisible: the claim is simply dropped and the librarian abstains.
+    """
+    s = str(page)
+    if not s.lstrip("-").isdigit():
+        raise ValueError(
+            f"page {page!r} is not a passage ordinal, so a citation cannot name one chunk "
+            f"with it. This shelf ranks ZIM shards, whose page IS the chunk index; a "
+            f"non-numeric page means $TIIBRARIAN_ZIM_SHARDS holds a shard from a corpus "
+            f"that pages differently.")
+    return int(s)
 
 
-def vector_retrieve(question, archive=None, topk=5, shortlist=200, con=None, index=None):
-    """Semantic retrieval over the passage index. Same hit shape as `retrieve`.
+def _titles(con, hits):
+    """-> {(source, book): title} for these hits. One query per federation table.
+
+    `corpus.retrieve`'s hit shape carries no title -- that shape is the grounding
+    seam's and stays as it is -- but the shelf prints one, so it is read here.
+
+    Which table holds a source is `corpus._route`'s question, not a second rule
+    written out again here. The map it owns is BY EXACT SOURCE NAME: a
+    `wikipedia_` prefix rule would send simple-wiki and medicine-wiki to a file
+    that does not hold them, and a title miss would quietly become the entry path.
+    """
+    import corpus as C
+
+    want = {}
+    for h in hits:
+        want.setdefault(C._route(con, h["source"]), set()).add((h["source"], h["book"]))
+    out = {}
+    for tbl, keys in want.items():
+        for src in sorted({s for s, _ in keys}):
+            books = sorted(b for s, b in keys if s == src)
+            marks = ", ".join(["?"] * len(books))
+            rows = con.execute(
+                f"SELECT book, any_value(title) FROM {tbl} "
+                f"WHERE source = ? AND book IN ({marks}) GROUP BY book",
+                [src] + books).fetchall()
+            out.update({(src, b): t for b, t in rows})
+    return out
+
+
+def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
+    """Semantic retrieval over the int8 substrate. Same hit shape as `retrieve`.
 
     THIS IS THE MODE THAT WORKS, and the difference is not marginal. Measured on
     the same four questions, full text vs vectors:
@@ -267,51 +328,56 @@ def vector_retrieve(question, archive=None, topk=5, shortlist=200, con=None, ind
     dominates the ranking, and nav-box link lists count the same as prose. Neither
     is a tuning problem; embeddings simply do not have either failure.
 
-    Two stages, and the SUBQUERY IS LOAD-BEARING: the coarse HNSW (`vec256`) picks
-    a shortlist, the exact 1024-dim cosine reorders it. Written as a subquery
-    rather than a CTE because DuckDB's planner does not use the HNSW through a CTE
-    — the same trap recorded for this index's own build.
+    RANKING IS `corpus.retrieve`, NOT A SECOND IMPLEMENTATION OF IT. This module
+    used to run its own two-stage query against one DuckDB file: a coarse HNSW
+    over `vec256 FLOAT[256]`, reordered by exact cosine over `vec FLOAT[1024]`.
+    `5b57e74` retired that in corpus.py for single-stage int8 over Vortex and left
+    this copy behind, so the two layers no longer agreed on what the index was.
 
-    `archive` filters in the OUTER stage on purpose. Filtering inside the coarse
-    stage removes the index from the plan and turns the query into a scan of 1.73M
-    rows; filtering outside keeps the HNSW and just needs a wider shortlist, which
-    is why one is scaled from the other.
+    WHAT IT COSTS ON THE SHELF AS IT SHIPS: nothing worth naming. Measured on
+    longbottom against the default zim-only SHARDS, end to end through this
+    function: 0.68 s unfiltered, 0.80 s filtered, both over 1.73M chunks, against
+    the retired HNSW path's sub-second on the same data.
+
+    WHAT IT COSTS WITH THE WIKIPEDIA SHARD IS UNSETTLED, AND THE TWO READINGS
+    DISAGREE. An earlier session measured 5.8-6.9 s/query over 18.8M chunks
+    against this same packed file, through grimoire-kb's `unified_retrieve`.
+    Here, through `retrieve_int8`, one full scan of that shard did not finish in
+    900 s, while the zim shard ranked at 1.7-3.2M rows/s in the same process. The
+    box showed a load average above 20 when it was sampled, which does not
+    obviously explain an 8x larger file taking more than 100x longer. The cause
+    is NOT known. Do not quote a Wikipedia latency from this docstring; measure
+    it on the machine that will serve the queries.
+
+    What it buys: every corpus corpus.py can reach, Wikipedia's 14.2M chunks among
+    them, and one place where a change to retrieval has to be made instead of two.
+
+    `archive` is handed DOWN as `corpus.retrieve(sources=...)` rather than applied
+    to the result here. The shards are not partitioned by source, so a filter
+    always costs an over-rank; the trim must then happen before the text reads,
+    because `corpus.retrieve` runs one federation query per hit it returns. Doing
+    it here instead would read -- and throw away -- the text of every over-ranked
+    hit, ~0.03 s apiece against the zim DB.
     """
-    import duckdb
     import corpus as C
-
-    path = index or VECTOR_INDEX
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"no passage index at {path}. Set $TIIBRARIAN_ZIM_INDEX, or use --mode fts "
-            f"for full-text retrieval that needs no index.")
 
     qvec = C.embed_query(question)
     own = con is None
-    con = con or duckdb.connect(path, read_only=True)
+    con = con or C.connect()
     try:
-        con.execute("LOAD vss")
-        where, args = "", []
-        if archive:
-            where = "WHERE source = ?"
-            args = [archive]
-            shortlist = max(shortlist, topk * 200)   # the filter discards most of it
-        rows = con.execute(
-            "SELECT source, book, page, text, title, "
-            "       array_cosine_distance(vec, ?::FLOAT[1024]) AS dist "
-            "FROM (SELECT source, book, page, text, title, vec FROM pages "
-            "      ORDER BY array_cosine_distance(vec256, ?::FLOAT[256]) LIMIT ?) "
-            + where +
-            " ORDER BY dist LIMIT ?",
-            [qvec, qvec[:256], shortlist] + args + [topk]).fetchall()
+        ranked = C.retrieve(qvec, topk=topk, con=con, shards=shards or SHARDS,
+                            sources=[archive] if archive else None)
+        titles = _titles(con, ranked)
     finally:
         if own:
             con.close()
 
-    return [{"n": i + 1, "archive": src, "path": b, "chunk": pg,
-             "title": (t or b.replace("_", " ")), "text": txt,
-             "locator": locator_str(src, b), "score": 1.0 - d}
-            for i, (src, b, pg, txt, t, d) in enumerate(rows)]
+    return [{"n": i + 1, "archive": h["source"], "path": h["book"],
+             "chunk": _ordinal(h["page"]),
+             "title": titles.get((h["source"], h["book"])) or h["book"].replace("_", " "),
+             "text": h["text"],
+             "locator": locator_str(h["source"], h["book"]), "score": h["score"]}
+            for i, h in enumerate(ranked)]
 
 
 def hits_to_pages(hits):

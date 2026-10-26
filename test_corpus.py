@@ -141,3 +141,66 @@ class EmbedQueryGuards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceFilter(unittest.TestCase):
+    """Filtering by source must happen BEFORE the text is attached.
+
+    `retrieve` reads each ranked hit's full text from the federation, one query
+    per hit. A caller that wants one source out of many must therefore not be
+    made to over-ask and then discard: zimshelf's archive filter asks for
+    `topk * 200`, and at ~0.03 s per text read -- measured against the real zim
+    DB, which carries no index on (source, book, page) -- a filtered call would
+    spend ~30 s reading text it is about to throw away.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        textdb = os.path.join(cls.tmp.name, "t.duckdb")
+        cls.shard = os.path.join(cls.tmp.name, "s.vortex")
+        b = duckdb.connect(textdb)
+        b.execute("INSTALL vortex; LOAD vortex;")
+        b.execute("CREATE TABLE pages(source VARCHAR, book VARCHAR, page VARCHAR, text VARCHAR)")
+        b.execute("CREATE TABLE _v(source VARCHAR, book VARCHAR, page VARCHAR, "
+                  "vec TINYINT[1024], vscale FLOAT)")
+        # Two sources, interleaved by score, so a topk that ignores the filter returns both.
+        for i in range(6):
+            src = "zim_wanted" if i % 2 else "zim_other"
+            b.execute("INSERT INTO pages VALUES (?,?,?,?)",
+                      [src, f"b{i}", "0", f"Page {i} of {src}, long enough to be a real passage."])
+            b.execute("INSERT INTO _v VALUES (?,?,?,?::TINYINT[1024],1.0)",
+                      [src, f"b{i}", "0", _vec({0: 127 - i})])
+        b.execute(f"COPY _v TO '{cls.shard}' (FORMAT vortex)")
+        b.close()
+        cls.con = corpus.connect(sl_db=textdb, zim_db=textdb)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.con.close()
+        cls.tmp.cleanup()
+
+    def test_unfiltered_still_returns_every_source(self):
+        hits = corpus.retrieve(_qvec(), topk=6, con=self.con, shards=[self.shard])
+        self.assertEqual({h["source"] for h in hits}, {"zim_wanted", "zim_other"})
+
+    def test_sources_keeps_only_what_was_asked_for(self):
+        hits = corpus.retrieve(_qvec(), topk=3, con=self.con, shards=[self.shard],
+                               sources=["zim_wanted"])
+        self.assertTrue(hits, "the filter must not empty the result")
+        self.assertEqual({h["source"] for h in hits}, {"zim_wanted"})
+
+    def test_text_is_not_read_for_hits_the_filter_discards(self):
+        """THE point of the parameter. Without it the caller over-asks and pays a
+        federation query per discarded hit."""
+        import unittest.mock as mock
+        with mock.patch.object(corpus, "_text", wraps=corpus._text) as t:
+            hits = corpus.retrieve(_qvec(), topk=3, con=self.con, shards=[self.shard],
+                                   sources=["zim_wanted"])
+        self.assertEqual(t.call_count, len(hits),
+                         "text was read for hits that were filtered out")
+
+    def test_n_is_renumbered_after_filtering(self):
+        hits = corpus.retrieve(_qvec(), topk=3, con=self.con, shards=[self.shard],
+                               sources=["zim_wanted"])
+        self.assertEqual([h["n"] for h in hits], list(range(1, len(hits) + 1)))
