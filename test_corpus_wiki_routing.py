@@ -114,13 +114,31 @@ class WikiRoutingTest(unittest.TestCase):
             self.assertIn((source, book), got,
                           f"{source} vanished from results -- text lookup missed, hit dropped")
 
-    def test_wiki_db_is_optional(self):
-        """Without a wiki DB the module must behave exactly as it did before."""
+    def test_wiki_db_is_optional_for_the_corpora_that_do_not_need_it(self):
+        """Without a wiki DB, every pre-existing source must behave exactly as before."""
         con = corpus.connect(sl_db=self.sl_db, zim_db=self.zim_db)
         try:
             self.assertIn("liquid that living things",
                           corpus._text(con, "wikipedia_en_simple_all_nopic_2026-05", "Water", "0"))
-            self.assertIsNone(corpus._text(con, BIG_WIKI, "Mars", "0"))
+            self.assertIn("Boil the water",
+                          corpus._text(con, "survivorlibrary_hastext", "b1", "1"))
+        finally:
+            con.close()
+
+    def test_half_configured_wiki_raises_instead_of_dropping_everything(self):
+        """The inverse of the prefix trap, and the same silent shape.
+
+        Put the wiki vortex in TIIBRARIAN_VORTEX_SHARDS but leave TIIBRARIAN_WIKI_DB unset, and
+        every one of the 14.2M wiki hits routes to z.pages, misses, and is dropped. That is 75%
+        of the corpus going quiet with nothing raised. corpus.embed_query sets the house rule for
+        this case -- it raises rather than falling back to another encoder, because a silent
+        degrade is the failure hardest to notice. Routing follows it.
+        """
+        con = corpus.connect(sl_db=self.sl_db, zim_db=self.zim_db)   # no wiki_db
+        try:
+            with self.assertRaises(RuntimeError) as e:
+                corpus._text(con, BIG_WIKI, "Mars", "0")
+            self.assertIn("TIIBRARIAN_WIKI_DB", str(e.exception))
         finally:
             con.close()
 

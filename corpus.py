@@ -145,8 +145,19 @@ def _route(con, source):
     """
     if source.startswith("survivorlibrary_"):
         return "sl.pages"
-    if source in WIKI_SOURCES and con.execute(
-            "SELECT 1 FROM duckdb_databases() WHERE database_name = 'w'").fetchone():
+    if source in WIKI_SOURCES:
+        if not con.execute(
+                "SELECT 1 FROM duckdb_databases() WHERE database_name = 'w'").fetchone():
+            # Half-configured: the vortex is being ranked but its text DB is not attached. Falling
+            # through to z.pages would miss on every row, and `retrieve` drops a hit with no text,
+            # so 14.2M chunks would go quiet with nothing raised -- the same silent shape as the
+            # prefix trap, arrived at from the other side. `embed_query` sets the house rule here:
+            # raise rather than degrade where the degrade is invisible.
+            raise RuntimeError(
+                f"source {source!r} is ranked from the wiki substrate but its text DB is not "
+                f"attached. Set TIIBRARIAN_WIKI_DB (or pass wiki_db= to connect), or drop the "
+                f"wiki vortex from TIIBRARIAN_VORTEX_SHARDS. Leaving it half-configured drops "
+                f"every hit from this corpus silently.")
         return "w.pages"
     return "z.pages"
 
