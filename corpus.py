@@ -71,13 +71,26 @@ def _load_retrieve_int8():
 _R = _load_retrieve_int8()
 
 # The int8 Vortex shards (ranking) and the federation text DBs (grounding). Both on nvme2 by default;
-# colon-delimited override. Text is routed by source prefix: survivorlibrary_* -> the SL DB, else the zim DB.
+# colon-delimited override. Text is routed to one of THREE federation DBs: survivorlibrary_* by prefix,
+# the sources in WIKI_SOURCES by EXACT NAME, everything else to the zim DB.
 SHARDS = os.environ.get(
     "TIIBRARIAN_VORTEX_SHARDS",
     "/srv/logical/opt/teague/corpus/survivorlibrary_vectors.vortex:"
     "/srv/logical/opt/teague/corpus/zim_vectors.vortex").split(":")
 SL_DB = os.environ.get("TIIBRARIAN_SL_DB", "/srv/logical/opt/teague/corpus/survivorlibrary.duckdb")
 ZIM_DB = os.environ.get("TIIBRARIAN_ZIM_DB", os.path.expanduser("~/corpus/zim-corpora.duckdb"))
+# A corpus too large to live in the zim DB gets a text DB of its own. wikipedia_en_all_nopic is
+# 14.2M chunks / 24 GB against the zim DB's 1.7M, so it is a separate file (substrate spec S4).
+# Unset by default: with no WIKI_DB the routing below is exactly the two-way split it always was.
+#
+# ROUTED BY EXACT SOURCE NAME, NOT BY PREFIX, and that is load-bearing. The zim DB already holds
+# wikipedia_en_simple_all_nopic_2026-05 (326,251) and wikipedia_en_medicine_maxi_2026-04 (214,771).
+# A `wikipedia_` prefix rule sends those two to a file that does not hold them; `_text` then returns
+# None, and `retrieve` DROPS a hit whose text is missing -- so two corpora would disappear from
+# results with nothing raised anywhere. Colon-delimited, same shape as SHARDS.
+WIKI_DB = os.environ.get("TIIBRARIAN_WIKI_DB", "")
+WIKI_SOURCES = frozenset(s for s in os.environ.get(
+    "TIIBRARIAN_WIKI_SOURCES", "wikipedia_en_all_nopic_2026-06").split(":") if s)
 EMBED_URL = os.environ.get("TIINY_EMBED_URL", "http://api.tiiny/v1/embeddings")
 AUTH = os.environ.get("TIINY_AUTH_KEY", "")
 MODEL = os.environ.get("TIINY_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
@@ -108,22 +121,50 @@ def embed_query(text, timeout=60):
     return vec
 
 
-def connect(sl_db=None, zim_db=None):
+def connect(sl_db=None, zim_db=None, wiki_db=None):
     """An in-memory connection with the Vortex ext loaded and the text DBs attached read-only.
 
     Ranking reads the int8 Vortex shards (`read_vortex`, paths passed to `retrieve`); grounding reads
-    page text from the attached federation DBs (`sl.pages` / `z.pages`, routed by source prefix).
+    page text from the attached federation DBs (`sl.pages` / `z.pages` / `w.pages`, see `_route`).
+    `w` is attached only when a wiki DB is configured, so the default connection is unchanged.
     """
     con = duckdb.connect()
     con.execute("INSTALL vortex; LOAD vortex;")
     con.execute(f"ATTACH '{sl_db or SL_DB}' AS sl (READ_ONLY);")
     con.execute(f"ATTACH '{zim_db or ZIM_DB}' AS z (READ_ONLY);")
+    if wiki_db or WIKI_DB:
+        con.execute(f"ATTACH '{wiki_db or WIKI_DB}' AS w (READ_ONLY);")
     return con
 
 
+def _route(con, source):
+    """Which federation table holds this source's text. -> 'sl.pages' | 'w.pages' | 'z.pages'.
+
+    Asks the CONNECTION whether `w` is attached rather than reading WIKI_DB, so a connection built
+    with an explicit `wiki_db=` (or without one) routes to what it actually has open.
+    """
+    if source.startswith("survivorlibrary_"):
+        return "sl.pages"
+    if source in WIKI_SOURCES:
+        if not con.execute(
+                "SELECT 1 FROM duckdb_databases() WHERE database_name = 'w'").fetchone():
+            # Half-configured: the vortex is being ranked but its text DB is not attached. Falling
+            # through to z.pages would miss on every row, and `retrieve` drops a hit with no text,
+            # so 14.2M chunks would go quiet with nothing raised -- the same silent shape as the
+            # prefix trap, arrived at from the other side. `embed_query` sets the house rule here:
+            # raise rather than degrade where the degrade is invisible.
+            raise RuntimeError(
+                f"source {source!r} is ranked from the wiki substrate but its text DB is not "
+                f"attached. Set TIIBRARIAN_WIKI_DB (or pass wiki_db= to connect), or drop the "
+                f"wiki vortex from TIIBRARIAN_VORTEX_SHARDS. Leaving it half-configured drops "
+                f"every hit from this corpus silently.")
+        return "w.pages"
+    return "z.pages"
+
+
 def _text(con, source, book, page):
-    """The full verbatim page text from the federation, routed by source prefix. -> str|None."""
-    tbl = "sl.pages" if source.startswith("survivorlibrary_") else "z.pages"
+    """The full verbatim page text from the federation, routed by `_route`. -> str|None."""
+    tbl = _route(con, source)
     row = con.execute(
         f"SELECT text FROM {tbl} WHERE source = ? AND book = ? AND CAST(page AS VARCHAR) = ?",
         [source, book, str(page)]).fetchone()
