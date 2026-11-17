@@ -339,15 +339,25 @@ def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
     function: 0.68 s unfiltered, 0.80 s filtered, both over 1.73M chunks, against
     the retired HNSW path's sub-second on the same data.
 
-    WHAT IT COSTS WITH THE WIKIPEDIA SHARD IS UNSETTLED, AND THE TWO READINGS
-    DISAGREE. An earlier session measured 5.8-6.9 s/query over 18.8M chunks
-    against this same packed file, through grimoire-kb's `unified_retrieve`.
-    Here, through `retrieve_int8`, one full scan of that shard did not finish in
-    900 s, while the zim shard ranked at 1.7-3.2M rows/s in the same process. The
-    box showed a load average above 20 when it was sampled, which does not
-    obviously explain an 8x larger file taking more than 100x longer. The cause
-    is NOT known. Do not quote a Wikipedia latency from this docstring; measure
-    it on the machine that will serve the queries.
+    WHAT IT COSTS WITH THE WIKIPEDIA SHARD IS NOW MEASURED: about 7.3 s, warm.
+    Slurm job 3824 on longbottom ranked that 14.2M-chunk shard in 7.32 s with a
+    bound parameter, and 7.63 s with the inlined SQL literal grimoire-kb's
+    `unified_retrieve` uses. The two query forms differ by 4%, and the literal is
+    the slower one, so the form is not the cost. Peak memory was 15.0 GB under a
+    40 GB limit, so the `vec::FLOAT[1024]` cast streams. Those figures are WARM.
+    A cold rank must first read 14.57 GB at 0.79 GB/s, so expect 18-20 s cold
+    (INFERRED from that read, not measured: emptying the page cache needs root).
+
+    THE EARLIER >1800 s RUN IS STILL NOT EXPLAINED, AND THIS DOCSTRING USED TO
+    DESCRIBE IT WRONGLY. That attempt was killed by `timeout 1800` (exit 124);
+    the text here said 900 s, which was incorrect. It is not reproduced. Four
+    causes are eliminated by measurement: the query form, the drive, memory, and
+    grimoire-kb's untimed `with_text` stage, whose per-hit lookup costs 0.18-1.87 s
+    where ~180 s would be needed. The host that ran it was never recorded, and
+    that is now the largest unknown. The "5.8-6.9 s over 18.8M chunks" figure this
+    docstring used to cite has NO source: it appears in no commit and no design
+    doc, so do not treat it as a measurement. These numbers are longbottom's;
+    measure again on the machine that will serve the queries.
 
     What it buys: every corpus corpus.py can reach, Wikipedia's 14.2M chunks among
     them, and one place where a change to retrieval has to be made instead of two.
