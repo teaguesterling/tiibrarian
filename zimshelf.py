@@ -350,14 +350,21 @@ def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
 
     THE EARLIER >1800 s RUN IS STILL NOT EXPLAINED, AND THIS DOCSTRING USED TO
     DESCRIBE IT WRONGLY. That attempt was killed by `timeout 1800` (exit 124);
-    the text here said 900 s, which was incorrect. It is not reproduced. Four
-    causes are eliminated by measurement: the query form, the drive, memory, and
-    grimoire-kb's untimed `with_text` stage, whose per-hit lookup costs 0.18-1.87 s
-    where ~180 s would be needed. The host that ran it was never recorded, and
-    that is now the largest unknown. The "5.8-6.9 s over 18.8M chunks" figure this
-    docstring used to cite has NO source: it appears in no commit and no design
-    doc, so do not treat it as a measurement. These numbers are longbottom's;
-    measure again on the machine that will serve the queries.
+    the text here said 900 s, which was incorrect. It is not reproduced. THREE
+    causes are eliminated by measurement: the query form, the drive, and memory.
+    Host load is NOT tested. The host that ran the failed attempt was never
+    recorded, and that is the largest remaining unknown: on snape every shard
+    path except ~/corpus crosses NFS to longbottom, and snape has 30 GB of
+    memory against a 15 GB peak, neither of which a longbottom job reproduces.
+
+    The "5.8-6.9 s over 18.8M chunks" figure has NO source: it appears in no
+    commit and no design doc, so do not treat it as measured. grimoire-kb's
+    `unified_retrieve` pipeline was profiled separately (Slurm jobs 3929 and
+    3938) and carries no hidden cost: its untimed `with_text` stage ATTACHes
+    three text DBs in 0.01 s and resolves a hit in 0.15-1.87 s. That makes the
+    unsourced figure plausible. It does NOT bear on this failure, which ran
+    through `retrieve_int8`, not through `unified_retrieve`. These numbers are
+    longbottom's; measure again on the machine that will serve the queries.
 
     What it buys: every corpus corpus.py can reach, Wikipedia's 14.2M chunks among
     them, and one place where a change to retrieval has to be made instead of two.
