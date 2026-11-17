@@ -171,20 +171,37 @@ def _text(con, source, book, page):
     return row[0] if row and row[0] else None
 
 
-def retrieve(qvec, topk=8, con=None, shards=None):
+#: How much a source-filtered call over-ranks before it trims. The filter is applied after
+#: ranking -- the shards are not partitioned by source -- so asking for exactly topk would
+#: return almost nothing once the other corpora are dropped.
+SOURCE_FILTER_OVERSAMPLE = 200
+
+
+def retrieve(qvec, topk=8, con=None, shards=None, sources=None):
     """Single-stage int8 vector retrieval, text attached from the federation. -> hits, best first.
 
     Ranking is cordexa `retrieve_int8` over the Vortex `shards` (default `SHARDS`; rough, truncated
     vectors); each hit's FULL verbatim text is then read from the federation (`_text`). A hit whose page
     has no text is dropped -- a miss is a value. The hit shape (n, source, book, page, text, score) is
     unchanged, so `hits_to_pages` / `next_page` / `page_ident` downstream are untouched.
+
+    `sources` restricts the result to those source names. It belongs here rather than in a caller
+    because the trim has to happen between ranking and the text reads, and only this function sees
+    both.
     """
     if len(qvec) != DIM:
         raise ValueError(f"query vector has {len(qvec)} dims, index expects {DIM}")
     own = con is None
     con = con or connect()
     try:
-        ranked = _R.retrieve(con, qvec, shards or SHARDS, topk=topk)
+        ranked = _R.retrieve(con, qvec, shards or SHARDS,
+                             topk=topk * SOURCE_FILTER_OVERSAMPLE if sources else topk)
+        if sources:
+            # Trim BEFORE the text loop below. Each `_text` is its own federation query against a
+            # table with no index on (source, book, page) -- ~0.03 s on the zim DB, measured -- so
+            # filtering afterwards would pay that for every one of the over-ranked hits it discards.
+            keep = frozenset(sources)
+            ranked = [h for h in ranked if h["source"] in keep][:topk]
         out = []
         for h in ranked:
             t = _text(con, h["source"], h["book"], h["page"])
