@@ -129,9 +129,16 @@ def page_ident(hit):
     down for its own corpus -- "when passages become sub-page (Wikipedia articles,
     Gutenberg chapters), add chapter, section or a passage ordinal so a citation
     can still name exactly one passage" -- and this is exactly that case.
+
+    ONLY a vector hit has an ordinal. An fts hit (`retrieve`) is a whole extracted
+    entry, deduplicated by path, so doc/path/id already name exactly one passage.
+    Reading `hit["chunk"]` unconditionally crashed fts mode with KeyError, and fts
+    is the only route to Gutenberg, which has no vectors.
     """
-    return {"kind": KIND, "id": hit["archive"], "path": hit["path"],
-            "doc": hit["locator"], "page": hit["chunk"]}
+    ident = {"kind": KIND, "id": hit["archive"], "path": hit["path"], "doc": hit["locator"]}
+    if "chunk" in hit:
+        ident["page"] = hit["chunk"]
+    return ident
 
 
 def _html(con, path, entry):

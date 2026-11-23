@@ -72,6 +72,36 @@ class TestGroundingEndToEnd(unittest.TestCase):
         self.assertEqual(v["citation_matched"], 1)
 
 
+class TestFtsHits(unittest.TestCase):
+    """fts mode crashed with KeyError: 'chunk' after retrieval returned hits.
+
+    3ff1463 made `page_ident` read `hit["chunk"]`, and only `vector_retrieve`
+    sets it. An fts hit is a WHOLE extracted entry, not passage 0 of the vector
+    chunking, so it has no ordinal to give -- and needs none: `retrieve` dedups
+    by entry path, so doc/path/id already name exactly one hit. fts is the only
+    route to Gutenberg, which has no vectors.
+    """
+
+    # The exact key set `retrieve` builds: no `chunk`, no `score`.
+    FTS = {"n": 1, "archive": "vikidia_en_all_maxi_2026-06", "path": "Aqueduct",
+           "title": "Aqueduct", "locator": Z.locator_str("vikidia_en_all_maxi_2026-06", "Aqueduct"),
+           "text": "An aqueduct is a channel built to carry water from a source to a town."}
+
+    def test_an_fts_hit_has_an_identity(self):
+        ident = Z.page_ident(self.FTS)
+        self.assertNotIn("page", ident, "an fts hit has no passage ordinal to claim")
+        self.assertEqual(ident["doc"], self.FTS["locator"])
+
+    def test_a_quoted_fts_claim_grounds(self):
+        hits = [self.FTS]
+        r = G.ground_answer("what is an aqueduct", Z.quote_top_hit("q", hits),
+                            Z.hits_to_pages(hits))
+        self.assertEqual([v["verdict"] for v in r["kept"]], ["grounded"], r)
+
+    def test_a_vector_hit_still_carries_its_ordinal(self):
+        self.assertEqual(Z.page_ident(B)["page"], 7)
+
+
 class TestModeGuards(unittest.TestCase):
 
     def test_fts_without_archive_is_refused(self):
