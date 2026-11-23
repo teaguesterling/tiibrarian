@@ -40,7 +40,26 @@ MODEL = os.environ.get("TIINY_CHAT_MODEL", "Qwen/Qwen3-8B")
 # roughly 3.5k prompt tokens AND a bounded answer. 5 pages x 2000 chars blew through it
 # and returned HTTP 504 with nothing -- a timeout, not an error the model produced.
 MAX_PAGE_CHARS = int(os.environ.get("TIIBRARIAN_MAX_PAGE_CHARS", "900"))
-MAX_TOKENS = int(os.environ.get("TIIBRARIAN_MAX_TOKENS", "700"))
+#
+# The ANSWER budget is a ceiling, not a target, and a reasoning model spends most of
+# it thinking. MEASURED 2026-11-23 on tiiny2/default (puffskein, through woollama),
+# three questions at max_tokens=8000: all `stop`, using 1730 / 2894 / 3297 completion
+# tokens at 49-56 tok/s. The old default of 700 cut all three before any content;
+# 3000 cut the third. 6000 is the largest measured need plus ~80% headroom. One
+# default rather than a per-model table: a gateway alias such as `tiiny2/default`
+# does not say whether it reasons, and a cut now raises BudgetExhausted on any route.
+MAX_TOKENS = int(os.environ.get("TIIBRARIAN_MAX_TOKENS", "6000"))
+# Sized to the budget: 6000 tokens at ~50 tok/s is ~120 s of generation alone.
+TIMEOUT = int(os.environ.get("TIIBRARIAN_SYNTH_TIMEOUT", "180"))
+
+
+class BudgetExhausted(RuntimeError):
+    """The model stopped at max_tokens before writing a parseable answer.
+
+    NOT an abstention. An abstention says the library does not cover the question;
+    here the library was never really asked. Same rule as c3.py: a cut is
+    unmeasured, not a verdict.
+    """
 
 SYSTEM = (
     "You answer only from the pages given to you. For every claim you make, quote a span "
@@ -139,8 +158,14 @@ def parse_claims(raw, hits):
     return out
 
 
-def device_synth(question, hits, timeout=120, temperature=0.0):
-    """Ask the device's LLM. Raises without a token rather than degrading silently."""
+def device_synth(question, hits, timeout=None, temperature=0.0):
+    """Ask the device's LLM. Raises without a token rather than degrading silently.
+
+    Also raises BudgetExhausted when the reply was cut at max_tokens and holds no
+    parseable claim -- otherwise that cut reaches ground_answer as zero claims and is
+    reported as "the library does not contain support for this". A cut that still
+    parses keeps its claims: each one is checked downstream like any other.
+    """
     if not AUTH:
         raise RuntimeError(
             "synth.device_synth needs TIINY_AUTH_KEY and the device reachable at "
@@ -153,6 +178,15 @@ def device_synth(question, hits, timeout=120, temperature=0.0):
     req = urllib.request.Request(
         CHAT_URL, data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + AUTH})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as r:
         payload = json.loads(r.read())
-    return parse_claims(payload["choices"][0]["message"]["content"], hits)
+    choice = payload["choices"][0]
+    claims = parse_claims(choice["message"].get("content"), hits)
+    if not claims and choice.get("finish_reason") == "length":
+        used = (payload.get("usage") or {}).get("completion_tokens", "?")
+        raise BudgetExhausted(
+            f"the model ran out of tokens: {MODEL} stopped at max_tokens={MAX_TOKENS} "
+            f"({used} completion tokens) before writing a parseable answer. This is not "
+            f"an abstention -- the pages were never answered from. Raise "
+            f"TIIBRARIAN_MAX_TOKENS (and TIIBRARIAN_SYNTH_TIMEOUT to match).")
+    return claims

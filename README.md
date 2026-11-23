@@ -112,6 +112,33 @@ outputs is ~0.97, and the CPU's are L2-normalised while the NPU's are raw. Mixin
 does not fail, it just quietly retrieves worse, so `corpus.embed_query` raises rather
 than substituting anything.
 
+### The two Tiinys through woollama
+
+The route that works today goes through woollama, the model gateway on dobby. pygmy
+embeds and puffskein synthesizes. The bearer token is the `WOOLLAMA_DOBBY_TOKEN` line of
+`~/.config/woollama/dobby.env`. Read it from that file; never print it or commit it, and
+do not use the device keys in `~/.local/tiiny/*.json`.
+
+```bash
+export TIINY_AUTH_KEY="$(sed -n 's/^WOOLLAMA_DOBBY_TOKEN=//p' ~/.config/woollama/dobby.env)"
+export TIINY_EMBED_URL=https://woollama.aidr.me/v1/embeddings
+export TIINY_EMBED_MODEL=tiiny-embed/Qwen/Qwen3-Embedding-0.6B   # pygmy: the ONLY encoder that matches the index
+export TIINY_CHAT_URL=https://woollama.aidr.me/v1/chat/completions
+export TIINY_CHAT_MODEL=tiiny2/default                           # puffskein, a reasoning model
+export TIIBRARIAN_ZIM_DIRS=/srv/logical/zimshelf/Library/zim      # the built-in default does not exist on longbottom
+```
+
+- **Not** `tiiny2-embed/Qwen/Qwen3-Embedding-4b`: it is a different encoder from the one that built the index.
+- Device work goes through Slurm with both licenses, one query at a time (pygmy wedges
+  under concurrent load): `srun -n 1 -c 2 --mem=8G -p batch -L tiiny-pygmy,tiiny-puffskein ...`.
+  A 503 from puffskein means it is busy; retry later.
+- **The answer budget.** `TIIBRARIAN_MAX_TOKENS` defaults to 6000 and
+  `TIIBRARIAN_SYNTH_TIMEOUT` to 180 s. The reasoning model spends most of the budget
+  thinking: measured, three questions needed 1730-3297 completion tokens at ~50 tok/s.
+  If the model stops at the budget with no parseable claim, `synth.BudgetExhausted`
+  is raised ("the model ran out of tokens"). That is not an abstention, and the fix is
+  a larger budget.
+
 ## Locators — citing a passage in any format
 
 The corpus is not only PDFs, so a citation cannot only be a page number. A locator is a
