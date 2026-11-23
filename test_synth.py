@@ -1,5 +1,7 @@
 """Prompt building and response parsing for device synthesis. Hermetic, no device."""
+import json
 import unittest
+from unittest import mock
 
 import ground_answer as G
 import synth
@@ -177,6 +179,55 @@ class EndToEnd(unittest.TestCase):
         r = G.ground_answer("q", synth.parse_claims(raw, HITS), PAGES)
         self.assertTrue(r["abstain"])
         self.assertEqual(r["dropped"][0]["verdict"], "misattributed")
+
+
+class Budget(unittest.TestCase):
+    """A reasoning model can spend the whole answer budget on thinking.
+
+    Measured on tiiny2/default (puffskein) at max_tokens=700: finish_reason
+    `length`, content empty, 2813 chars of reasoning. parse_claims returned [],
+    and ground_answer reported "the library does not contain support for this"
+    -- an abstention, which is a claim about the LIBRARY. The library was never
+    asked. So a cut with nothing parseable must raise, not abstain.
+    """
+
+    def _reply(self, finish, content, completion_tokens=700):
+        payload = {"choices": [{"finish_reason": finish,
+                                "message": {"content": content}}],
+                   "usage": {"completion_tokens": completion_tokens}}
+
+        class R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(payload).encode()
+        return R()
+
+    def _synth(self, finish, content):
+        with mock.patch.object(synth, "AUTH", "t"), \
+             mock.patch.object(synth.urllib.request, "urlopen",
+                               return_value=self._reply(finish, content)):
+            return synth.device_synth("q", HITS)
+
+    def test_a_cut_with_no_content_raises_rather_than_abstains(self):
+        with self.assertRaises(synth.BudgetExhausted) as e:
+            self._synth("length", "")
+        self.assertIn("ran out of tokens", str(e.exception))
+        self.assertIn("TIIBRARIAN_MAX_TOKENS", str(e.exception))
+
+    def test_a_cut_with_null_content_raises(self):
+        with self.assertRaises(synth.BudgetExhausted):
+            self._synth("length", None)
+
+    def test_a_cut_mid_json_raises(self):
+        with self.assertRaises(synth.BudgetExhausted):
+            self._synth("length", '{"claims": [{"text": "Blanch", "span": "Blanch the')
+
+    def test_a_complete_empty_answer_is_still_an_abstention(self):
+        self.assertEqual(self._synth("stop", '{"claims": []}'), [])
+
+    def test_a_cut_after_parseable_claims_keeps_them(self):
+        raw = '{"claims":[{"text":"t","span":"Blanch the beans for three minutes"}]}'
+        self.assertEqual(len(self._synth("length", raw)), 1)
 
 
 class Guards(unittest.TestCase):
