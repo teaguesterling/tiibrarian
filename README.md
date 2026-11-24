@@ -80,6 +80,22 @@ test_c3.py         needs the device; skips loudly without it
 
 ## Run
 
+**Data paths are per host, and they are not in the code.** Name them once, in
+`~/.config/tiibrarian/paths.env` (or the file `$TIIBRARIAN_CONFIG` names). An
+environment variable of the same name wins over the file. `KEY=VALUE`, absolute
+paths, no quotes:
+
+```
+TIIBRARIAN_VORTEX_SHARDS=<dir>/survivorlibrary_vectors.vortex:<dir>/zim_vectors.vortex
+TIIBRARIAN_ZIM_SHARDS=<dir>/zim_vectors.vortex
+TIIBRARIAN_SL_DB=<dir>/survivorlibrary.duckdb
+TIIBRARIAN_ZIM_DIRS=<zim-dir>
+```
+
+Unset, the vector asks raise and name the setting they need. `TIIBRARIAN_ZIM_DB`
+defaults to `~/corpus/zim-corpora.duckdb`, and the archive directories to
+`~/Projects/Tiiny`.
+
 ```bash
 # tests — no device, no network
 CORDEXA_HOME=~/Projects/cordexa python3 -m unittest discover -p 'test_*.py'
@@ -125,7 +141,6 @@ export TIINY_EMBED_URL=https://<gateway>/v1/embeddings
 export TIINY_EMBED_MODEL=pygmy-embed/Qwen/Qwen3-Embedding-0.6B   # pygmy: the ONLY encoder that matches the index
 export TIINY_CHAT_URL=https://<gateway>/v1/chat/completions
 export TIINY_CHAT_MODEL=puffskein/default                         # puffskein, a reasoning model
-export TIIBRARIAN_ZIM_DIRS=<zim-dir>                              # where your .zim archives are, if not the built-in default
 ```
 
 - **Not** `puffskein-embed/Qwen/Qwen3-Embedding-4b`: it is a different encoder from the one that built the index.

@@ -51,6 +51,7 @@ import duckdb
 
 import continuity
 import ground_answer as G
+import local_config
 import locator
 
 # int8 ranking lives in cordexa (the substrate owner). Locate the checkout via the shared
@@ -70,15 +71,14 @@ def _load_retrieve_int8():
 
 _R = _load_retrieve_int8()
 
-# The int8 Vortex shards (ranking) and the federation text DBs (grounding). Both on nvme2 by default;
-# colon-delimited override. Text is routed to one of THREE federation DBs: survivorlibrary_* by prefix,
-# the sources in WIKI_SOURCES by EXACT NAME, everything else to the zim DB.
-SHARDS = os.environ.get(
-    "TIIBRARIAN_VORTEX_SHARDS",
-    "/srv/logical/opt/teague/corpus/survivorlibrary_vectors.vortex:"
-    "/srv/logical/opt/teague/corpus/zim_vectors.vortex").split(":")
-SL_DB = os.environ.get("TIIBRARIAN_SL_DB", "/srv/logical/opt/teague/corpus/survivorlibrary.duckdb")
-ZIM_DB = os.environ.get("TIIBRARIAN_ZIM_DB", os.path.expanduser("~/corpus/zim-corpora.duckdb"))
+# The int8 Vortex shards (ranking) and the federation text DBs (grounding). Per-host settings: the
+# environment, then the local paths file (see local_config). No default for the shards or the
+# survivorlibrary DB -- `retrieve` and `connect` raise naming the setting. Text is routed to one of
+# THREE federation DBs: survivorlibrary_* by prefix, the sources in WIKI_SOURCES by EXACT NAME,
+# everything else to the zim DB.
+SHARDS = local_config.paths("TIIBRARIAN_VORTEX_SHARDS")
+SL_DB = local_config.setting("TIIBRARIAN_SL_DB")
+ZIM_DB = local_config.setting("TIIBRARIAN_ZIM_DB", os.path.expanduser("~/corpus/zim-corpora.duckdb"))
 # A corpus too large to live in the zim DB gets a text DB of its own. wikipedia_en_all_nopic is
 # 14.2M chunks / 24 GB against the zim DB's 1.7M, so it is a separate file (substrate spec S4).
 # Unset by default: with no WIKI_DB the routing below is exactly the two-way split it always was.
@@ -128,9 +128,10 @@ def connect(sl_db=None, zim_db=None, wiki_db=None):
     page text from the attached federation DBs (`sl.pages` / `z.pages` / `w.pages`, see `_route`).
     `w` is attached only when a wiki DB is configured, so the default connection is unchanged.
     """
+    sl_db = local_config.require(sl_db or SL_DB, "TIIBRARIAN_SL_DB")
     con = duckdb.connect()
     con.execute("INSTALL vortex; LOAD vortex;")
-    con.execute(f"ATTACH '{sl_db or SL_DB}' AS sl (READ_ONLY);")
+    con.execute(f"ATTACH '{sl_db}' AS sl (READ_ONLY);")
     con.execute(f"ATTACH '{zim_db or ZIM_DB}' AS z (READ_ONLY);")
     if wiki_db or WIKI_DB:
         con.execute(f"ATTACH '{wiki_db or WIKI_DB}' AS w (READ_ONLY);")
@@ -191,10 +192,11 @@ def retrieve(qvec, topk=8, con=None, shards=None, sources=None):
     """
     if len(qvec) != DIM:
         raise ValueError(f"query vector has {len(qvec)} dims, index expects {DIM}")
+    shards = local_config.require(shards or SHARDS, "TIIBRARIAN_VORTEX_SHARDS")
     own = con is None
     con = con or connect()
     try:
-        ranked = _R.retrieve(con, qvec, shards or SHARDS,
+        ranked = _R.retrieve(con, qvec, shards,
                              topk=topk * SOURCE_FILTER_OVERSAMPLE if sources else topk)
         if sources:
             # Trim BEFORE the text loop below. Each `_text` is its own federation query against a

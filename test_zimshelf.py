@@ -172,9 +172,13 @@ def corpus_hit(source, book, page, text, score=0.9):
 
 @contextlib.contextmanager
 def fake_corpus(hits, titles=None):
-    """Stub corpus's device, connection and ranking. -> the `retrieve` mock."""
+    """Stub corpus's device, connection and ranking. -> the `retrieve` mock.
+
+    The shelf's shard list is a per-host setting, so it is pinned here to a
+    placeholder: these tests must not depend on which host runs them."""
     import corpus as C
-    with mock.patch.object(C, "embed_query", return_value=[0.0] * 1024), \
+    with mock.patch.object(Z, "SHARDS", ["/fixture/zim_vectors.vortex"]), \
+         mock.patch.object(C, "embed_query", return_value=[0.0] * 1024), \
          mock.patch.object(C, "connect", return_value=mock.MagicMock()), \
          mock.patch.object(C, "retrieve", return_value=list(hits)) as r, \
          mock.patch.object(Z, "_titles", return_value=titles or {}):
@@ -251,15 +255,18 @@ class TestTheShelfKeepsItsScope(unittest.TestCase):
     def test_survivorlibrary_is_not_silently_added_to_the_shelf(self):
         """corpus.SHARDS also ranks 12.9 GB of scanned manuals. zimshelf is the
         librarian over the ZIM archives; widening that is a decision, not a
-        side effect of changing how ranking works."""
-        self.assertTrue(Z.SHARDS, "zimshelf must name the shards it ranks")
+        side effect of changing how ranking works.
+
+        Whatever the host configures. That an EMPTY shelf list raises, rather than
+        falling through to corpus.SHARDS, is in test_local_config."""
         self.assertFalse([s for s in Z.SHARDS if "survivorlibrary" in s],
                          "survivorlibrary is not on this shelf: %r" % (Z.SHARDS,))
 
     def test_the_shards_it_names_are_the_ones_it_ranks(self):
         with fake_corpus([WIKI]) as r:
             Z.vector_retrieve("q")
-        self.assertEqual(r.call_args.kwargs.get("shards"), Z.SHARDS)
+            shelf = Z.SHARDS                 # read inside: fake_corpus pins it
+        self.assertEqual(r.call_args.kwargs.get("shards"), shelf)
 
 
 class TestArchiveFilter(unittest.TestCase):

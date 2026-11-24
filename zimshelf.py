@@ -46,6 +46,7 @@ import sys
 
 import ground_answer as G
 import cordexa_home
+import local_config
 
 CORDEXA = cordexa_home.find(os.path.join("corpus", "zim_readers.py"))
 
@@ -63,13 +64,14 @@ from zim_readers import DuckdbReader        # noqa: E402
 
 KIND = "zim"
 
-#: Where the archives live. The shelf's canonical directory first; `~/Projects/Tiiny`
-#: holds Gutenberg and the mini Wikipedia. `$TIIBRARIAN_ZIM_DIRS` overrides, and
-#: `$CORDEXA_ZIM_DIRS` is honoured so one setting serves both layers.
+#: Where the archives live: a per-host setting, `$TIIBRARIAN_ZIM_DIRS` or its line in the
+#: local paths file (see local_config). `$CORDEXA_ZIM_DIRS` is honoured so one setting
+#: serves both layers. With neither, only `~/Projects/Tiiny`, which holds Gutenberg and
+#: the mini Wikipedia; `archive_file` raises listing the directories it tried.
 ARCHIVE_DIRS = [
     d for d in (os.environ.get("TIIBRARIAN_ZIM_DIRS")
                 or os.environ.get("CORDEXA_ZIM_DIRS")
-                or "/srv/logical/portable/zim:" + os.path.expanduser("~/Projects/Tiiny")
+                or local_config.setting("TIIBRARIAN_ZIM_DIRS", os.path.expanduser("~/Projects/Tiiny"))
                 ).split(":") if d
 ]
 
@@ -258,9 +260,10 @@ def retrieve(question, archive, topk=5, max_relax=MAX_RELAX, titles=True, title_
 #: Wikipedia shard here to put its 14.2M chunks on the shelf -- and set
 #: $TIIBRARIAN_WIKI_DB along with it, or `corpus._route` raises rather than let every
 #: wiki hit fall through to a DB that does not hold it.
-SHARDS = os.environ.get(
-    "TIIBRARIAN_ZIM_SHARDS",
-    "/srv/logical/opt/teague/corpus/zim_vectors.vortex").split(":")
+#: A per-host setting with no default. An empty list must RAISE here, never reach
+#: corpus.retrieve: its own `shards or SHARDS` would rank corpus's list instead, which
+#: carries survivorlibrary, and the shelf would widen with nothing said.
+SHARDS = local_config.paths("TIIBRARIAN_ZIM_SHARDS")
 
 def _ordinal(page):
     """corpus's `page` -> the INT passage ordinal this module cites.
@@ -342,12 +345,12 @@ def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
     this copy behind, so the two layers no longer agreed on what the index was.
 
     WHAT IT COSTS ON THE SHELF AS IT SHIPS: nothing worth naming. Measured on
-    longbottom against the default zim-only SHARDS, end to end through this
+    the compute host against the zim-only SHARDS, end to end through this
     function: 0.68 s unfiltered, 0.80 s filtered, both over 1.73M chunks, against
     the retired HNSW path's sub-second on the same data.
 
     WHAT IT COSTS WITH THE WIKIPEDIA SHARD IS NOW MEASURED: about 7.3 s, warm.
-    Slurm job 3824 on longbottom ranked that 14.2M-chunk shard in 7.32 s with a
+    Slurm job 3824 on the compute host ranked that 14.2M-chunk shard in 7.32 s with a
     bound parameter, and 7.63 s with the inlined SQL literal grimoire-kb's
     `unified_retrieve` uses. The two query forms differ by 4%, and the literal is
     the slower one, so the form is not the cost. Peak memory was 15.0 GB under a
@@ -360,9 +363,9 @@ def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
     the text here said 900 s, which was incorrect. It is not reproduced. THREE
     causes are eliminated by measurement: the query form, the drive, and memory.
     Host load is NOT tested. The host that ran the failed attempt was never
-    recorded, and that is the largest remaining unknown: on snape every shard
-    path except ~/corpus crosses NFS to longbottom, and snape has 30 GB of
-    memory against a 15 GB peak, neither of which a longbottom job reproduces.
+    recorded, and that is the largest remaining unknown: on the laptop every shard
+    path except ~/corpus crosses NFS to the compute host, and the laptop has 30 GB
+    of memory against a 15 GB peak, neither of which a compute-host job reproduces.
 
     The "5.8-6.9 s over 18.8M chunks" figure has NO source: it appears in no
     commit and no design doc, so do not treat it as measured. grimoire-kb's
@@ -371,7 +374,7 @@ def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
     three text DBs in 0.01 s and resolves a hit in 0.15-1.87 s. That makes the
     unsourced figure plausible. It does NOT bear on this failure, which ran
     through `retrieve_int8`, not through `unified_retrieve`. These numbers are
-    longbottom's; measure again on the machine that will serve the queries.
+    the compute host's; measure again on the machine that will serve the queries.
 
     What it buys: every corpus corpus.py can reach, Wikipedia's 14.2M chunks among
     them, and one place where a change to retrieval has to be made instead of two.
@@ -385,11 +388,12 @@ def vector_retrieve(question, archive=None, topk=5, con=None, shards=None):
     """
     import corpus as C
 
+    shards = local_config.require(shards or SHARDS, "TIIBRARIAN_ZIM_SHARDS")
     qvec = C.embed_query(question)
     own = con is None
     con = con or C.connect()
     try:
-        ranked = C.retrieve(qvec, topk=topk, con=con, shards=shards or SHARDS,
+        ranked = C.retrieve(qvec, topk=topk, con=con, shards=shards,
                             sources=[archive] if archive else None)
         titles = _titles(con, ranked)
     finally:
