@@ -42,11 +42,11 @@ MODEL = os.environ.get("TIINY_CHAT_MODEL", "Qwen/Qwen3-8B")
 MAX_PAGE_CHARS = int(os.environ.get("TIIBRARIAN_MAX_PAGE_CHARS", "900"))
 #
 # The ANSWER budget is a ceiling, not a target, and a reasoning model spends most of
-# it thinking. MEASURED 2026-11-23 on tiiny2/default (puffskein, through woollama),
-# three questions at max_tokens=8000: all `stop`, using 1730 / 2894 / 3297 completion
+# it thinking. MEASURED 2026-11-23 on puffskein/default (then named tiiny2/default),
+# through woollama, three questions at max_tokens=8000: all `stop`, using 1730 / 2894 / 3297 completion
 # tokens at 49-56 tok/s. The old default of 700 cut all three before any content;
 # 3000 cut the third. 6000 is the largest measured need plus ~80% headroom. One
-# default rather than a per-model table: a gateway alias such as `tiiny2/default`
+# default rather than a per-model table: a gateway alias such as `puffskein/default`
 # does not say whether it reasons, and a cut now raises BudgetExhausted on any route.
 MAX_TOKENS = int(os.environ.get("TIIBRARIAN_MAX_TOKENS", "6000"))
 # Sized to the budget: 6000 tokens at ~50 tok/s is ~120 s of generation alone.

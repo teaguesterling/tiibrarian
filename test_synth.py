@@ -184,7 +184,7 @@ class EndToEnd(unittest.TestCase):
 class Budget(unittest.TestCase):
     """A reasoning model can spend the whole answer budget on thinking.
 
-    Measured on tiiny2/default (puffskein) at max_tokens=700: finish_reason
+    Measured on puffskein/default (then tiiny2/default) at max_tokens=700: finish_reason
     `length`, content empty, 2813 chars of reasoning. parse_claims returned [],
     and ground_answer reported "the library does not contain support for this"
     -- an abstention, which is a claim about the LIBRARY. The library was never

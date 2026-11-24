@@ -122,13 +122,13 @@ do not use the device keys in `~/.local/tiiny/*.json`.
 ```bash
 export TIINY_AUTH_KEY="$(sed -n 's/^WOOLLAMA_DOBBY_TOKEN=//p' ~/.config/woollama/dobby.env)"
 export TIINY_EMBED_URL=https://woollama.aidr.me/v1/embeddings
-export TIINY_EMBED_MODEL=tiiny-embed/Qwen/Qwen3-Embedding-0.6B   # pygmy: the ONLY encoder that matches the index
+export TIINY_EMBED_MODEL=pygmy-embed/Qwen/Qwen3-Embedding-0.6B   # pygmy: the ONLY encoder that matches the index
 export TIINY_CHAT_URL=https://woollama.aidr.me/v1/chat/completions
-export TIINY_CHAT_MODEL=tiiny2/default                           # puffskein, a reasoning model
+export TIINY_CHAT_MODEL=puffskein/default                         # puffskein, a reasoning model
 export TIIBRARIAN_ZIM_DIRS=/srv/logical/zimshelf/Library/zim      # the built-in default does not exist on longbottom
 ```
 
-- **Not** `tiiny2-embed/Qwen/Qwen3-Embedding-4b`: it is a different encoder from the one that built the index.
+- **Not** `puffskein-embed/Qwen/Qwen3-Embedding-4b`: it is a different encoder from the one that built the index.
 - Device work goes through Slurm with both licenses, one query at a time (pygmy wedges
   under concurrent load): `srun -n 1 -c 2 --mem=8G -p batch -L tiiny-pygmy,tiiny-puffskein ...`.
   A 503 from puffskein means it is busy; retry later.
