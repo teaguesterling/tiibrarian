@@ -114,18 +114,18 @@ than substituting anything.
 
 ### The two Tiinys through woollama
 
-The route that works today goes through woollama, the model gateway on dobby. pygmy
-embeds and puffskein synthesizes. The bearer token is the `WOOLLAMA_DOBBY_TOKEN` line of
-`~/.config/woollama/dobby.env`. Read it from that file; never print it or commit it, and
-do not use the device keys in `~/.local/tiiny/*.json`.
+The route that works today goes through woollama, the model gateway. pygmy embeds and
+puffskein synthesizes. The gateway's bearer token is kept in a local token file. Read it
+from that file; never print it or commit it, and do not use the device keys in
+`~/.local/tiiny/*.json`.
 
 ```bash
-export TIINY_AUTH_KEY="$(sed -n 's/^WOOLLAMA_DOBBY_TOKEN=//p' ~/.config/woollama/dobby.env)"
-export TIINY_EMBED_URL=https://woollama.aidr.me/v1/embeddings
+export TIINY_AUTH_KEY="$(sed -n 's/^<TOKEN_VAR>=//p' <token-file>)"
+export TIINY_EMBED_URL=https://<gateway>/v1/embeddings
 export TIINY_EMBED_MODEL=pygmy-embed/Qwen/Qwen3-Embedding-0.6B   # pygmy: the ONLY encoder that matches the index
-export TIINY_CHAT_URL=https://woollama.aidr.me/v1/chat/completions
+export TIINY_CHAT_URL=https://<gateway>/v1/chat/completions
 export TIINY_CHAT_MODEL=puffskein/default                         # puffskein, a reasoning model
-export TIIBRARIAN_ZIM_DIRS=/srv/logical/zimshelf/Library/zim      # the built-in default does not exist on longbottom
+export TIIBRARIAN_ZIM_DIRS=<zim-dir>                              # where your .zim archives are, if not the built-in default
 ```
 
 - **Not** `puffskein-embed/Qwen/Qwen3-Embedding-4b`: it is a different encoder from the one that built the index.
